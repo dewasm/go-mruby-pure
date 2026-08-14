@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The committed generated interpreter is what users build; this job is their exact path.
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ["1.24", "1.25"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)"
+      - run: go test ./...
+      - run: go test -race ./...
+
+  # Prove the committed artifacts still come from the pinned sources: rebuild the wasm
+  # (byte-identical by construction) and reconvert with the pinned dewasm revision,
+  # requiring an empty diff against the checked-in generated files.
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out dewasm at the pinned revision
+        run: |
+          rev=$(sed -n 's/^# Pinned dewasm revision: //p' tools/convert.sh)
+          git clone https://github.com/dewasm/dewasm ../dewasm
+          git -C ../dewasm checkout "$rev"
+      - run: tools/build-wasm.sh
+      - run: tools/convert.sh
+      - run: git diff --exit-code -- mrubyvm/
