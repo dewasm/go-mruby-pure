@@ -330,6 +330,12 @@ func guestError(r any) error {
 	return nil
 }
 
+// GuestError is the error behind a panic the generated code raised, nil for a panic from anywhere else.
+// A recover placed between a host callback and hostEntry has to re-panic what this reports: those panics end the instance and no Ruby raise can stand in for them.
+func GuestError(r any) error {
+	return guestError(r)
+}
+
 // ReleaseRef hands a ref back to the guest registry.
 // It takes no guest call and no VM lock, so it is safe from a finalizer or another goroutine; the queue is drained at the next call that takes the lock.
 func (in *Instance) ReleaseRef(ref int32) {
@@ -486,6 +492,14 @@ func (in *Instance) Yield(procRef int32, wantRef bool) (v Value, err error) {
 		return Value{}, err
 	}
 	return in.value(wantRef), nil
+}
+
+// ResultRef registers the last captured value and returns the ref, which the caller owns.
+// It is the deferred form of the wantRef argument, for a caller that reads the kind first and only wants a ref for some of them.
+func (in *Instance) ResultRef() (ref int32, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+	return int32(in.fn.resultRef()), nil
 }
 
 // ResultToS replaces the string readout of the last captured value with its to_s, which is the only way to get one for a kind that is neither String nor Symbol.

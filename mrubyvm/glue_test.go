@@ -709,6 +709,82 @@ func TestResultToS(t *testing.T) {
 	}
 }
 
+func TestResultRefAfterTheCall(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	v := mustEval(t, in, "[1, 2, 3]", false)
+	if v.Ref != 0 {
+		t.Fatalf("Eval without wantRef gave ref %d", v.Ref)
+	}
+	ref, err := in.ResultRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref == 0 {
+		t.Fatal("ResultRef = 0")
+	}
+	defer in.ReleaseRef(ref)
+	if n, err := in.ArrayLen(ref); err != nil || n != 3 {
+		t.Fatalf("ArrayLen of the deferred ref = %d, %v", n, err)
+	}
+
+	// A second one is another ref to the same object, not to a copy.
+	again, err := in.ResultRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(again)
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushRef(ref); err != nil {
+		t.Fatal(err)
+	}
+	eq, err := in.Call(again, "equal?", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eq.Kind != KindTrue {
+		t.Errorf("two refs to one result are not the same object (%v)", eq.Kind)
+	}
+
+	// The capture is what it reads, so a later call moves it on.
+	mustEval(t, in, "'other'", false)
+	moved, err := in.ResultRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(moved)
+	if k, err := in.RefKind(moved); err != nil || k != KindString {
+		t.Errorf("RefKind after a second call = %v, %v", k, err)
+	}
+}
+
+func TestGuestErrorNamesTheGuestPanics(t *testing.T) {
+	for _, c := range []struct {
+		panicked any
+		want     string
+	}{
+		{&rtExit{code: 3}, "mrubyvm: the guest exited with status 3"},
+		{&rtTrap{msg: "unreachable"}, "mrubyvm: wasm trap: unreachable"},
+		{&rtLinkError{msg: "no such import"}, "mrubyvm: no such import"},
+	} {
+		err := GuestError(c.panicked)
+		if err == nil {
+			t.Errorf("GuestError(%T) = nil", c.panicked)
+			continue
+		}
+		if err.Error() != c.want {
+			t.Errorf("GuestError(%T) = %q, want %q", c.panicked, err, c.want)
+		}
+	}
+	for _, other := range []any{"a string", fmt.Errorf("an error"), 42} {
+		if err := GuestError(other); err != nil {
+			t.Errorf("GuestError(%T) = %v, want nil: it did not come from the guest", other, err)
+		}
+	}
+}
+
 func TestABIErrorsOnBadRefs(t *testing.T) {
 	in := newVM(t, nil, nil, nil)
 
