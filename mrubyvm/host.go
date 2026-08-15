@@ -186,6 +186,7 @@ type dmFuncs struct {
 	refRelease  func(uint32)
 	kind        func(uint32) uint32
 	registryLen func() uint32
+	objID       func(uint32) uint64
 
 	argsReset     func()
 	argsPushNil   func()
@@ -195,6 +196,10 @@ type dmFuncs struct {
 	argsPushStr   func(uint32, uint32)
 	argsPushSym   func(uint32, uint32)
 	argsPushRef   func(uint32)
+
+	captureArg func() uint32
+	newArray   func() uint32
+	newHash    func() uint32
 
 	aryLen   func(uint32) uint64
 	aryGet   func(uint32, uint64) uint32
@@ -263,6 +268,7 @@ func bindFuncs(m *Mrubyvm) (dmFuncs, error) {
 	bindTo(m, "dm_ref_release", &f.refRelease, &err)
 	bindTo(m, "dm_kind", &f.kind, &err)
 	bindTo(m, "dm_registry_len", &f.registryLen, &err)
+	bindTo(m, "dm_obj_id", &f.objID, &err)
 	bindTo(m, "dm_args_reset", &f.argsReset, &err)
 	bindTo(m, "dm_args_push_nil", &f.argsPushNil, &err)
 	bindTo(m, "dm_args_push_bool", &f.argsPushBool, &err)
@@ -271,6 +277,9 @@ func bindFuncs(m *Mrubyvm) (dmFuncs, error) {
 	bindTo(m, "dm_args_push_str", &f.argsPushStr, &err)
 	bindTo(m, "dm_args_push_sym", &f.argsPushSym, &err)
 	bindTo(m, "dm_args_push_ref", &f.argsPushRef, &err)
+	bindTo(m, "dm_capture_arg", &f.captureArg, &err)
+	bindTo(m, "dm_new_array", &f.newArray, &err)
+	bindTo(m, "dm_new_hash", &f.newHash, &err)
 	bindTo(m, "dm_ary_len", &f.aryLen, &err)
 	bindTo(m, "dm_ary_get", &f.aryGet, &err)
 	bindTo(m, "dm_hash_keys", &f.hashKeys, &err)
@@ -515,7 +524,7 @@ func (in *Instance) ResultToS() (s string, err error) {
 
 // --- argument scratch ----------------------------------------------------
 
-// ArgsReset empties the argument scratch, which is where the next Call/CallBlock/Yield takes its arguments and, inside a host callback, where the return value goes.
+// ArgsReset empties the argument scratch, which is where the next Call/CallBlock/Yield takes its arguments, where CaptureArg/NewArray/NewHash take the values they answer with, and, inside a host callback, where the return value goes.
 func (in *Instance) ArgsReset() (err error) {
 	defer in.enter()()
 	defer in.guard(&err)
@@ -600,6 +609,47 @@ func (in *Instance) RegistryLen() (n int32, err error) {
 	defer in.enter()()
 	defer in.guard(&err)
 	return int32(in.fn.registryLen()), nil
+}
+
+// ObjectID is the identity of the value behind ref, read from the interpreter's C state rather than by sending object_id, so a Ruby-level override of object_id or __id__ cannot change it.
+// 0 means the guest does not know the ref.
+func (in *Instance) ObjectID(ref int32) (id int64, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+	return int64(in.fn.objID(uint32(ref))), nil
+}
+
+// CaptureArg makes the one value in the argument scratch the last captured value, which is how an immediate gets a ref of its own and how a ref reads back as an immediate.
+func (in *Instance) CaptureArg(wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	if err := in.status(in.fn.captureArg()); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
+}
+
+// NewArray captures an Array holding the argument scratch.
+func (in *Instance) NewArray(wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	if err := in.status(in.fn.newArray()); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
+}
+
+// NewHash captures a Hash built from the argument scratch taken as key/value pairs.
+func (in *Instance) NewHash(wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	if err := in.status(in.fn.newHash()); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
 }
 
 // ArrayLen is the length of the Array behind ref, -1 when it is not one.

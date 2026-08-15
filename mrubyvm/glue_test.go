@@ -317,6 +317,215 @@ func TestArgsPushEveryKindAndCall(t *testing.T) {
 	}
 }
 
+func TestObjectIDComesFromTheInterpreterNotFromRuby(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	mustEval(t, in, "$held = 'the same object'", false)
+	first, err := in.ResultRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(first)
+	second := mustEval(t, in, "$held", true).Ref
+	defer in.ReleaseRef(second)
+	other := mustEval(t, in, "'another object'", true).Ref
+	defer in.ReleaseRef(other)
+
+	id, err := in.ObjectID(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == 0 {
+		t.Fatal("ObjectID of a held value = 0")
+	}
+	if again, err := in.ObjectID(second); err != nil || again != id {
+		t.Errorf("two refs to one object have ids %d and %d (%v)", id, again, err)
+	}
+	if elsewhere, err := in.ObjectID(other); err != nil || elsewhere == id {
+		t.Errorf("two objects share the id %d (%v)", elsewhere, err)
+	}
+	if unknown, err := in.ObjectID(9999); err != nil || unknown != 0 {
+		t.Errorf("ObjectID of an unknown ref = %d, %v; want 0", unknown, err)
+	}
+
+	// A Ruby-level override answers what it likes; the identity the host reads is not it.
+	overridden := mustEval(t, in, "class Sneaky; def object_id; 1; end; def __id__; 1; end; end; Sneaky.new", true).Ref
+	defer in.ReleaseRef(overridden)
+	id, err = in.ObjectID(overridden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == 1 {
+		t.Error("ObjectID answered what the overridden object_id answers")
+	}
+	if v := mustEval(t, in, "Sneaky.new.object_id", false); v.Int != 1 {
+		t.Errorf("the override is not in effect on the Ruby side: %+v", v)
+	}
+}
+
+func TestCaptureArgCrossesBetweenImmediateAndRef(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	// An immediate becomes a ref of its own.
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushString("text"); err != nil {
+		t.Fatal(err)
+	}
+	v, err := in.CaptureArg(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(v.Ref)
+	if v.Kind != KindString || v.Str != "text" || v.Ref == 0 {
+		t.Fatalf("CaptureArg of a String = %+v", v)
+	}
+	size, err := in.Call(v.Ref, "size", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size.Int != 4 {
+		t.Errorf("the captured ref is not the String that was pushed: %+v", size)
+	}
+
+	// A ref reads back as the immediate it holds.
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushRef(v.Ref); err != nil {
+		t.Fatal(err)
+	}
+	back, err := in.CaptureArg(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Kind != KindString || back.Str != "text" {
+		t.Errorf("CaptureArg of a ref = %+v", back)
+	}
+
+	// The scratch is emptied, so the next one has nothing to capture.
+	if _, err := in.CaptureArg(false); err == nil {
+		t.Error("CaptureArg of an empty scratch succeeded")
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushInt(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushInt(2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.CaptureArg(false); err == nil {
+		t.Error("CaptureArg of two values succeeded")
+	}
+}
+
+func TestNewArrayAndNewHashFromTheScratch(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	held := mustEval(t, in, "Object.new", true)
+	defer in.ReleaseRef(held.Ref)
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	for _, push := range []func() error{
+		func() error { return in.PushInt(1) },
+		func() error { return in.PushString("two") },
+		func() error { return in.PushRef(held.Ref) },
+	} {
+		if err := push(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ary, err := in.NewArray(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(ary.Ref)
+	if ary.Kind != KindArray || ary.Ref == 0 {
+		t.Fatalf("NewArray = %+v", ary)
+	}
+	if n, err := in.ArrayLen(ary.Ref); err != nil || n != 3 {
+		t.Fatalf("the new Array holds %d elements (%v)", n, err)
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := in.Call(ary.Ref, "inspect", false); err != nil || s.Str != `[1, "two", `+objectInspect(t, in, held.Ref)+"]" {
+		t.Errorf("the new Array inspects as %q (%v)", s.Str, err)
+	}
+
+	// The scratch is consumed, so the next Array is empty.
+	empty, err := in.NewArray(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(empty.Ref)
+	if n, err := in.ArrayLen(empty.Ref); err != nil || n != 0 {
+		t.Errorf("the second Array holds %d elements (%v)", n, err)
+	}
+
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushSymbol("key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushInt(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushString("other"); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushFloat(0.5); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := in.NewHash(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(hash.Ref)
+	if hash.Kind != KindHash || hash.Ref == 0 {
+		t.Fatalf("NewHash = %+v", hash)
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := in.Call(hash.Ref, "inspect", false); err != nil || s.Str != `{key: 7, "other" => 0.5}` {
+		t.Errorf("the new Hash inspects as %q (%v)", s.Str, err)
+	}
+
+	// A key with no value is a misuse the guest refuses.
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushSymbol("odd"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.NewHash(false); err == nil {
+		t.Error("NewHash of an odd number of values succeeded")
+	}
+	// The VM still works.
+	if v := mustEval(t, in, "'fine'", false); v.Str != "fine" {
+		t.Errorf("after the refused NewHash: %+v", v)
+	}
+}
+
+// objectInspect is what Ruby's inspect says about a plain object, whose address is in the text.
+func objectInspect(t *testing.T, in *Instance, ref int32) string {
+	t.Helper()
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	v, err := in.Call(ref, "inspect", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v.Str
+}
+
 func TestYieldProc(t *testing.T) {
 	in := newVM(t, nil, nil, nil)
 	p := mustEval(t, in, "->(a, b) { a * b }", true)

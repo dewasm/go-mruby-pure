@@ -7,7 +7,7 @@
 #
 # No `mruby-bin-*` gem is listed: this build produces a library, not a command, and the shim links libmruby.a itself.
 #
-# Kernel#puts is defined only by mruby-io (mrblib/kernel.rb: `$stdout.puts`), which cannot build for wasi (its src/io.c unconditionally `#include <sys/wait.h>` for IO.popen/fork, absent from wasi-libc); mruby-wasi-puts below is a first-party gem restoring #puts on top of core Kernel#print (src/print.c, needs no gem).
+# Kernel#puts is defined only by mruby-io (mrblib/kernel.rb: `$stdout.puts`), which cannot build for wasi (outside Windows its src/io.c includes <sys/wait.h> for IO.popen/fork, absent from wasi-libc); mruby-wasi-puts below is a first-party gem restoring #puts on top of core Kernel#print (src/print.c, needs no gem).
 #
 # `rake` writes a lockfile pinning each gem's git checkout next to whatever file MRUBY_CONFIG points at (`Lockfile.enable` runs unconditionally when the class loads); every gem here is `core:` (part of the sha256-pinned source tree already) or first-party, so it would only ever record mruby's own version/release_no, and it would land as an untracked file beside this checked-in one.
 MRuby::Lockfile.disable
@@ -16,7 +16,6 @@ MRuby::Build.new do |conf|
   conf.toolchain
   conf.build_mrbc_exec
   conf.disable_libmruby
-  conf.disable_presym
 end
 
 MRuby::CrossBuild.new('wasm32-wasi') do |conf|

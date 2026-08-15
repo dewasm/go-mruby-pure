@@ -52,7 +52,7 @@ func TestOneVMFromManyGoroutines(t *testing.T) {
 					errs <- err
 					return
 				}
-				n, err := v.Int()
+				n, err := v.AsInt()
 				if err != nil {
 					errs <- err
 					return
@@ -66,7 +66,7 @@ func TestOneVMFromManyGoroutines(t *testing.T) {
 					errs <- err
 					return
 				}
-				if _, err := held.Export(); err != nil {
+				if _, err := held.GoValue(); err != nil {
 					errs <- err
 					return
 				}
@@ -114,7 +114,7 @@ func TestHostFunctionsFromManyGoroutines(t *testing.T) {
 					errs <- err
 					return
 				}
-				if n, _ := v.Int(); n != int64(3*i) {
+				if n, _ := v.AsInt(); n != int64(3*i) {
 					errs <- fmt.Errorf("work(%d) = %d, want %d", i, n, 3*i)
 					return
 				}
@@ -154,7 +154,7 @@ func TestManyVMsFromManyGoroutines(t *testing.T) {
 					errs <- err
 					return
 				}
-				x, err := v.Export()
+				x, err := v.GoValue()
 				if err != nil {
 					errs <- err
 					return

@@ -47,7 +47,7 @@ func BenchmarkFib20(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if n, _ := v.Int(); n != 6765 {
+		if n, _ := v.AsInt(); n != 6765 {
 			b.Fatalf("fib(20) = %d", n)
 		}
 	}

@@ -9,29 +9,38 @@ import (
 func TestExtractorsAreStrict(t *testing.T) {
 	vm := newVM(t)
 
-	if _, err := mustEval(t, vm, "1.5").Int(); err == nil {
-		t.Error("Int of a Float succeeded")
+	if _, err := mustEval(t, vm, "1.5").AsInt(); err == nil {
+		t.Error("AsInt of a Float succeeded")
 	}
-	if _, err := mustEval(t, vm, "'7'").Int(); err == nil {
-		t.Error("Int of a String succeeded")
+	if _, err := mustEval(t, vm, "'7'").AsInt(); err == nil {
+		t.Error("AsInt of a String succeeded")
 	}
-	if f, err := mustEval(t, vm, "7").Float(); err != nil || f != 7 {
-		t.Errorf("Float of an Integer = %v, %v", f, err)
+	if f, err := mustEval(t, vm, "7").AsFloat(); err != nil || f != 7 {
+		t.Errorf("AsFloat of an Integer = %v, %v", f, err)
 	}
-	if _, err := mustEval(t, vm, "nil").Bool(); err == nil {
-		t.Error("Bool of nil succeeded; truthiness is not what Bool reports")
+	if _, err := mustEval(t, vm, "nil").AsBool(); err == nil {
+		t.Error("AsBool of nil succeeded; truthiness is not what AsBool reports")
 	}
-	if _, err := mustEval(t, vm, "1").Bool(); err == nil {
-		t.Error("Bool of an Integer succeeded")
+	if _, err := mustEval(t, vm, "1").AsBool(); err == nil {
+		t.Error("AsBool of an Integer succeeded")
 	}
-	if b, err := mustEval(t, vm, "false").Bool(); err != nil || b {
-		t.Errorf("Bool of false = %v, %v", b, err)
+	if b, err := mustEval(t, vm, "false").AsBool(); err != nil || b {
+		t.Errorf("AsBool of false = %v, %v", b, err)
 	}
-	if s, err := mustEval(t, vm, ":sym").Text(); err != nil || s != "sym" {
-		t.Errorf("Text of a Symbol = %q, %v", s, err)
+	if s, err := mustEval(t, vm, "'text'").AsString(); err != nil || s != "text" {
+		t.Errorf("AsString of a String = %q, %v", s, err)
 	}
-	if _, err := mustEval(t, vm, "[]").Text(); err == nil {
-		t.Error("Text of an Array succeeded")
+	if _, err := mustEval(t, vm, ":sym").AsString(); err == nil {
+		t.Error("AsString of a Symbol succeeded; a Symbol is not a String")
+	}
+	if s, err := mustEval(t, vm, ":sym").AsSymbol(); err != nil || s != Symbol("sym") {
+		t.Errorf("AsSymbol of a Symbol = %q, %v", s, err)
+	}
+	if _, err := mustEval(t, vm, "'sym'").AsSymbol(); err == nil {
+		t.Error("AsSymbol of a String succeeded")
+	}
+	if _, err := mustEval(t, vm, "[]").AsString(); err == nil {
+		t.Error("AsString of an Array succeeded")
 	}
 	if got := mustEval(t, vm, "1.5").typeError("an Integer").Error(); !strings.Contains(got, "Float") {
 		t.Errorf("the type error does not name the type: %s", got)
@@ -47,14 +56,14 @@ func TestExtractorsAreStrict(t *testing.T) {
 	if !absent.IsNil() || absent.Type() != TypeNil {
 		t.Error("a value that is not there does not read as nil")
 	}
-	if _, err := absent.Int(); err == nil {
-		t.Error("Int of a value that is not there succeeded")
+	if _, err := absent.AsInt(); err == nil {
+		t.Error("AsInt of a value that is not there succeeded")
 	}
 	if _, err := absent.Call("to_s"); err == nil {
 		t.Error("Call on a value that is not there succeeded")
 	}
-	if x, err := absent.Export(); x != nil || err != nil {
-		t.Errorf("Export of a value that is not there = %v, %v", x, err)
+	if x, err := absent.GoValue(); x != nil || err != nil {
+		t.Errorf("GoValue of a value that is not there = %v, %v", x, err)
 	}
 }
 
@@ -71,11 +80,11 @@ func TestStringAndInspectMatchRuby(t *testing.T) {
 	} {
 		v := mustEval(t, vm, src)
 		want := mustEval(t, vm, "("+src+").to_s")
-		if got, _ := want.Text(); v.String() != got {
+		if got, _ := want.AsString(); v.String() != got {
 			t.Errorf("(%s).String() = %q, Ruby says %q", src, v.String(), got)
 		}
 		want = mustEval(t, vm, "("+src+").inspect")
-		if got, _ := want.Text(); v.Inspect() != got {
+		if got, _ := want.AsString(); v.Inspect() != got {
 			t.Errorf("(%s).Inspect() = %q, Ruby says %q", src, v.Inspect(), got)
 		}
 	}
@@ -97,7 +106,7 @@ func TestFormatFloatMatchesRuby(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, _ := want.Text()
+		got, _ := want.AsString()
 		if formatFloat(f) != got {
 			t.Errorf("formatFloat(%v) = %q, Ruby says %q", f, formatFloat(f), got)
 		}
@@ -115,9 +124,9 @@ func TestStringOfARaisingToS(t *testing.T) {
 	}
 }
 
-func TestExportNested(t *testing.T) {
+func TestGoValueNested(t *testing.T) {
 	vm := newVM(t)
-	x, err := mustEval(t, vm, `[1, 2.5, 'three', :four, nil, true, [5, [6]], {'k' => [7]}]`).Export()
+	x, err := mustEval(t, vm, `[1, 2.5, 'three', :four, nil, true, [5, [6]], {'k' => [7]}]`).GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,19 +136,19 @@ func TestExportNested(t *testing.T) {
 		map[any]any{"k": []any{int64(7)}},
 	}
 	if !equalAny(x, want) {
-		t.Errorf("Export = %#v, want %#v", x, want)
+		t.Errorf("GoValue = %#v, want %#v", x, want)
 	}
 }
 
-func TestExportHashKeysOfEveryKind(t *testing.T) {
+func TestGoValueHashKeysOfEveryKind(t *testing.T) {
 	vm := newVM(t)
-	x, err := mustEval(t, vm, `{'s' => 1, :y => 2, 3 => 3, 4.5 => 4, nil => 5, true => 6, [7] => 7}`).Export()
+	x, err := mustEval(t, vm, `{'s' => 1, :y => 2, 3 => 3, 4.5 => 4, nil => 5, true => 6, [7] => 7}`).GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
 	m, ok := x.(map[any]any)
 	if !ok {
-		t.Fatalf("Export of a Hash = %T", x)
+		t.Fatalf("GoValue of a Hash = %T", x)
 	}
 	for key, want := range map[any]any{"s": int64(1), Symbol("y"): int64(2), int64(3): int64(3), 4.5: int64(4), nil: int64(5), true: int64(6)} {
 		if got, ok := m[key]; !ok || !equalAny(got, want) {
@@ -166,15 +175,15 @@ func TestExportHashKeysOfEveryKind(t *testing.T) {
 	}
 }
 
-func TestExportKeepsWhatItCannotConvert(t *testing.T) {
+func TestGoValueKeepsWhatItCannotConvert(t *testing.T) {
 	vm := newVM(t)
-	x, err := mustEval(t, vm, "[1, Object.new, {k: ->(a) { a }}]").Export()
+	x, err := mustEval(t, vm, "[1, Object.new, {k: ->(a) { a }}]").GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
 	xs, ok := x.([]any)
 	if !ok || len(xs) != 3 {
-		t.Fatalf("Export = %#v", x)
+		t.Fatalf("GoValue = %#v", x)
 	}
 	obj, ok := xs[1].(*Value)
 	if !ok || obj.Type() != TypeObject {
@@ -195,35 +204,35 @@ func TestExportKeepsWhatItCannotConvert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := answer.Int(); n != 9 {
+	if n, _ := answer.AsInt(); n != 9 {
 		t.Errorf("the kept Proc answered %d", n)
 	}
 }
 
-func TestExportRejectsCycles(t *testing.T) {
+func TestGoValueRejectsCycles(t *testing.T) {
 	vm := newVM(t)
 	for _, src := range []string{
 		"a = []; a << a; a",
 		"h = {}; h[:self] = h; h",
 		"a = []; b = [a]; a << b; a",
 	} {
-		_, err := mustEval(t, vm, src).Export()
+		_, err := mustEval(t, vm, src).GoValue()
 		if err == nil {
-			t.Errorf("Export(%s) succeeded on a structure that contains itself", src)
+			t.Errorf("GoValue(%s) succeeded on a structure that contains itself", src)
 			continue
 		}
 		if !strings.Contains(err.Error(), "contains itself") {
-			t.Errorf("Export(%s) failed with %v", src, err)
+			t.Errorf("GoValue(%s) failed with %v", src, err)
 		}
 	}
 
 	// The same object twice side by side is not a cycle.
-	x, err := mustEval(t, vm, "x = [1]; [x, x]").Export()
+	x, err := mustEval(t, vm, "x = [1]; [x, x]").GoValue()
 	if err != nil {
-		t.Fatalf("Export of a shared element: %v", err)
+		t.Fatalf("GoValue of a shared element: %v", err)
 	}
 	if !equalAny(x, []any{[]any{int64(1)}, []any{int64(1)}}) {
-		t.Errorf("Export of a shared element = %#v", x)
+		t.Errorf("GoValue of a shared element = %#v", x)
 	}
 }
 
@@ -236,8 +245,8 @@ func TestReleaseEndsTheValue(t *testing.T) {
 	if _, err := v.Call("size"); err == nil {
 		t.Error("a call on a released value succeeded")
 	}
-	if _, err := v.Export(); err == nil {
-		t.Error("Export of a released value succeeded")
+	if _, err := v.GoValue(); err == nil {
+		t.Error("GoValue of a released value succeeded")
 	}
 	if got := v.String(); !strings.Contains(got, "released") {
 		t.Errorf("String of a released value = %q", got)
@@ -249,7 +258,7 @@ func TestReleaseEndsTheValue(t *testing.T) {
 	// An immediate holds no reference, so releasing it is nothing.
 	imm := mustEval(t, vm, "42")
 	imm.Release()
-	if n, err := imm.Int(); err != nil || n != 42 {
+	if n, err := imm.AsInt(); err != nil || n != 42 {
 		t.Errorf("an immediate did not survive Release: %d, %v", n, err)
 	}
 	if v := mustEval(t, vm, "'still here'"); v.String() != "still here" {

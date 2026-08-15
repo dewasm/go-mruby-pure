@@ -4,22 +4,21 @@
 //
 //	vm, err := mruby.New()
 //	v, err := vm.Eval("1 + 2")
-//	n, err := v.Int()
+//	n, err := v.AsInt()
 //
 // # Conversions
 //
-// A closed list of Go types crosses into Ruby, as an argument, as a host function's result, or as an element of either:
+// A closed list of Go types crosses into Ruby, as an argument, as a host function's result, as an element of either, or through [VM.ToValue]:
 // nil, bool, every signed and unsigned integer type (a uint64 past [math.MaxInt64] is an error), float32 and float64,
 // string, [Symbol], []byte as a String, []any as an Array, map[any]any and map[string]any as a Hash, and [Value].
 // Anything else is an error naming the Go type.
 //
-// Coming back, [Value.Export] answers nil, bool, int64, float64, string, [Symbol], []any and map[any]any,
+// Coming back, [Value.GoValue] answers nil, bool, int64, float64, string, [Symbol], []any and map[any]any,
 // and leaves a *[Value] where a Ruby value has no Go counterpart.
 package mruby
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -44,11 +43,6 @@ type VM struct {
 
 	// Indexed by the id passed to the interpreter, offset by one so that id 0 stays "no function".
 	fns []*hostFunc
-
-	// References to the interpreter's own side of the conversions, evaluated on first use and held for the life of the VM.
-	identity   int32
-	arrayClass int32
-	hashClass  int32
 }
 
 // Option configures a VM.
@@ -186,15 +180,8 @@ func (vm *VM) callString(ref int32, name string) (string, error) {
 	return vm.in.ResultToS()
 }
 
-// identitySource is a Proc that hands its argument straight back: it is how a value crosses into the interpreter and comes back out in the other form.
-const identitySource = "->(x) { x }"
-
 // materialize gives an immediate a reference of its own, which the caller owns; it is how an immediate becomes a receiver.
 func (vm *VM) materialize(v *Value) (int32, error) {
-	proc, err := vm.constant(&vm.identity, identitySource)
-	if err != nil {
-		return 0, err
-	}
 	a, err := v.arg(vm)
 	if err != nil {
 		return 0, err
@@ -205,48 +192,26 @@ func (vm *VM) materialize(v *Value) (int32, error) {
 	if err := a.push(vm.in); err != nil {
 		return 0, err
 	}
-	if _, err := vm.in.Yield(proc, false); err != nil {
-		return 0, vm.wrap(err)
-	}
-	ref, err := vm.in.ResultRef()
-	if err != nil {
-		return 0, err
-	}
-	if ref == 0 {
-		return 0, errors.New("mruby: the interpreter would not hold on to the value")
-	}
-	return ref, nil
-}
-
-// constant evaluates src once and keeps the reference for the life of the VM.
-func (vm *VM) constant(cached *int32, src string) (int32, error) {
-	if *cached != 0 {
-		return *cached, nil
-	}
-	raw, err := vm.in.Eval(src, true)
+	raw, err := vm.in.CaptureArg(true)
 	if err != nil {
 		return 0, vm.wrap(err)
 	}
 	if raw.Ref == 0 {
-		return 0, fmt.Errorf("mruby: the interpreter would not hold on to %s", src)
+		return 0, errors.New("mruby: the interpreter would not hold on to the value")
 	}
-	*cached = raw.Ref
 	return raw.Ref, nil
 }
 
-// objectID is Ruby's object identity, which is what tells an already visited container from an equal one.
+// objectID is the value's identity, which is what tells an already visited container from an equal one.
 func (vm *VM) objectID(ref int32) (int64, error) {
-	if err := vm.in.ArgsReset(); err != nil {
+	id, err := vm.in.ObjectID(ref)
+	if err != nil {
 		return 0, err
 	}
-	raw, err := vm.in.Call(ref, "object_id", false)
-	if err != nil {
-		return 0, vm.wrap(err)
+	if id == 0 {
+		return 0, errors.New("mruby: the interpreter does not know the value")
 	}
-	if raw.Kind != mrubyvm.KindInt {
-		return 0, errors.New("mruby: object_id did not answer an Integer")
-	}
-	return raw.Int, nil
+	return id, nil
 }
 
 func referenced(k mrubyvm.Kind) bool {

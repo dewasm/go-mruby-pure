@@ -101,10 +101,10 @@ func TestDefineParameterKinds(t *testing.T) {
 		}
 	}
 
-	// A Symbol reaches a string parameter, as Text does.
-	mustDefine(t, vm, "go_text", func(s string) string { return s })
-	if got := mustEval(t, vm, "go_text(:from_a_symbol)").String(); got != "from_a_symbol" {
-		t.Errorf("go_text(:from_a_symbol) = %q", got)
+	// A Symbol reaches a string parameter as its name; a parameter typed Symbol is what tells the two apart.
+	mustDefine(t, vm, "go_string", func(s string) string { return s })
+	if got := mustEval(t, vm, "go_string(:from_a_symbol)").String(); got != "from_a_symbol" {
+		t.Errorf("go_string(:from_a_symbol) = %q", got)
 	}
 }
 
@@ -329,7 +329,7 @@ func TestBlocksThreeLevels(t *testing.T) {
 		if block == nil {
 			return nil, Raise("LocalJumpError", "no block given")
 		}
-		seed, err := c.Arg(0).Int()
+		seed, err := c.Arg(0).AsInt()
 		if err != nil {
 			return nil, err
 		}
@@ -337,7 +337,7 @@ func TestBlocksThreeLevels(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		n, err := answer.Int()
+		n, err := answer.AsInt()
 		if err != nil {
 			return nil, err
 		}
@@ -353,7 +353,7 @@ func TestBlocksThreeLevels(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		n, err := doubled.Int()
+		n, err := doubled.AsInt()
 		if err != nil {
 			return nil, err
 		}
@@ -385,7 +385,7 @@ func TestProcFromGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := answer.Int(); got != 42 {
+	if got, _ := answer.AsInt(); got != 42 {
 		t.Errorf("the Proc answered %d", got)
 	}
 
@@ -397,7 +397,7 @@ func TestProcFromGo(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			x, err := v.Export()
+			x, err := v.GoValue()
 			if err != nil {
 				return nil, err
 			}
@@ -420,7 +420,7 @@ func TestClasses(t *testing.T) {
 	if err := counter.DefineMethod("initialize", func(c *Call) (any, error) {
 		start := int64(0)
 		if c.Len() > 0 {
-			if start, err = c.Arg(0).Int(); err != nil {
+			if start, err = c.Arg(0).AsInt(); err != nil {
 				return nil, err
 			}
 		}
@@ -433,7 +433,7 @@ func TestClasses(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		n, err := held.Int()
+		n, err := held.AsInt()
 		if err != nil {
 			return nil, err
 		}
@@ -454,7 +454,7 @@ func TestClasses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := v.Int(); got != want {
+		if got, _ := v.AsInt(); got != want {
 			t.Errorf("bump = %d, want %d", got, want)
 		}
 	}
@@ -490,7 +490,7 @@ func TestClasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := twice.Int(); got != 2 {
+	if got, _ := twice.AsInt(); got != 2 {
 		t.Errorf("the derived method answered %d, want 2", got)
 	}
 

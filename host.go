@@ -180,17 +180,13 @@ func (vm *VM) adopt(ref int32) *Value {
 	}
 	defer vm.in.ReleaseRef(ref)
 
-	proc, err := vm.constant(&vm.identity, identitySource)
-	if err != nil {
-		return nil
-	}
 	if err := vm.in.ArgsReset(); err != nil {
 		return nil
 	}
 	if err := vm.in.PushRef(ref); err != nil {
 		return nil
 	}
-	raw, err := vm.in.Yield(proc, false)
+	raw, err := vm.in.CaptureArg(false)
 	if err != nil {
 		return nil
 	}

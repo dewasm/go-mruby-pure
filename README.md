@@ -1,9 +1,10 @@
 # go-mruby
 
-mruby for Go without cgo.
+**mruby** for **Go** *without cgo*.
 
-The [mruby](https://mruby.org) interpreter is compiled to WebAssembly (WASI) and translated to pure Go source by [dewasm](https://github.com/dewasm/dewasm), so this library needs no C toolchain, no shared libraries, and no cgo.
+The [mruby](https://mruby.org) interpreter is compiled to WebAssembly (WASI) and translated to **pure Go** source by [`dewasm`](https://github.com/dewasm/dewasm), so this library needs *no C toolchain*, no *shared libraries*, and *no cgo*.
 `go get` is the whole installation, cross compilation keeps working, and the interpreter runs inside your process as ordinary Go code.
+It is *unrelated* to [mitchellh/go-mruby](https://github.com/mitchellh/go-mruby), the archived cgo bindings, beyond the name.
 
 ```go
 vm, err := mruby.New()
@@ -16,7 +17,7 @@ fmt.Println(v) // hello, world
 ## Features
 
 - **Every Ruby value crosses as a value or a handle, never as a string.**
-  `*Value` carries immediates (nil, booleans, integers, floats, strings, symbols) by value and everything else as a garbage-collected handle; `Export` expands arrays and hashes into `[]any` and `map[any]any` recursively, with cycle detection.
+  `*Value` carries immediates (nil, booleans, integers, floats, strings, symbols) by value and everything else as a garbage-collected handle; `GoValue` expands arrays and hashes into `[]any` and `map[any]any` recursively, with cycle detection.
 - **Go functions become Ruby methods.**
   Reflection over an ordinary Go signature (`func(string) (string, error)` and the like; an `error` return raises in Ruby), or an explicit form receiving self, arguments, and the block.
   Blocks are first class: a host function can yield, and Ruby Procs are callable from Go.
@@ -35,7 +36,7 @@ fmt.Println(v) // hello, world
 
 ## How it works
 
-mruby 3.4.0 plus a small C shim is compiled with `zig cc` for `wasm32-wasi` (setjmp/longjmp lowers onto the WebAssembly exception-handling proposal) and translated by the dewasm Go backend into the committed `mrubyvm/` package.
+mruby 4.0.0 plus a small C shim is compiled with `zig cc` for `wasm32-wasi` (setjmp/longjmp lowers onto the WebAssembly exception-handling proposal) and translated by the dewasm Go backend into the committed `mrubyvm/` package.
 The public API is a thin layer over that generated interpreter; there is no runtime dependency on wasm tooling, dewasm, or zig.
 
 Regenerating the interpreter (only needed when changing the shim, the gem set, or the dewasm revision):
@@ -51,10 +52,10 @@ Measured on Apple M1 Pro (`go test -bench .`):
 
 | Benchmark | Time |
 | --- | --- |
-| `New` (fresh interpreter) | 0.62 ms |
-| `Eval` of an arithmetic expression | 3.2 µs |
-| Ruby calling a Go-defined method | 1.6 µs |
-| `fib(20)` in Ruby | 9.7 ms |
+| `New` (fresh interpreter) | 0.80 ms |
+| `Eval` of an arithmetic expression | 3.4 µs |
+| Ruby calling a Go-defined method | 2.8 µs |
+| `fib(20)` in Ruby | 15 ms |
 
 ## Limits
 
@@ -64,5 +65,6 @@ Measured on Apple M1 Pro (`go test -bench .`):
 
 ## License
 
-MIT ([LICENSE](LICENSE)).
-The generated `mrubyvm/` package embeds mruby, which is MIT licensed ([LICENSE.mruby](LICENSE.mruby)).
+The MIT license ([LICENSE](LICENSE)).
+
+The generated `mrubyvm/` package embeds mruby, which is MIT licensed ([LICENSE-MRUBY](LICENSE-MRUBY)).

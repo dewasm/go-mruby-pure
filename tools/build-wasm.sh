@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build tools/cache/mruby_shim.wasm: mruby 3.4.0 plus tools/shim/shim.c, linked as a WASI reactor.
+# Build tools/cache/mruby_shim.wasm: mruby 4.0.0 plus tools/shim/shim.c, linked as a WASI reactor.
 #
 # mruby's raise/rescue/ensure lower to C setjmp/longjmp (include/mruby/throw.h) and wasm32 has no native setjmp/longjmp, so every object is compiled with LLVM's SJLJ lowering, which rewrites them into try_table/throw of the exception-handling proposal.
 # wasm-opt is never run on the result: it cannot parse exception handling.
@@ -11,6 +11,7 @@
 #
 # The gem set is the one confirmed to compile clean on wasi (mruby-io, mruby-dir and mruby-socket cannot: they need <sys/wait.h>, <signal.h> and <sys/socket.h>, which wasi-libc does not provide), minus every mruby-bin-* command and plus mruby-compiler, which dm_eval needs.
 # Losing mruby-io also loses Kernel#puts (it is mruby-io/mrblib/kernel.rb, not core); tools/mruby-wasi-puts restores it on top of core Kernel#print.
+# mruby-bigint is what makes an integer literal past 2**31-1 work at all: mruby 4.0.0's parser reads a literal as int32 and hands everything wider to the bigint pool entry (mrbgems/mruby-compiler/core/parse.y, new_int), which without the gem is a RangeError when the VM loads it.
 #
 # Re-running is a no-op while tools/cache/mruby_shim.stamp matches the inputs; FORCE=1 rebuilds from a clean tree, which is what the byte-identical rebuild is verified with.
 
@@ -19,21 +20,28 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
-MRUBY_VERSION=3.4.0
+MRUBY_VERSION=4.0.0
 MRUBY_URL="https://github.com/mruby/mruby/archive/refs/tags/${MRUBY_VERSION}.tar.gz"
-MRUBY_SHA256=183711c7a26d932b5342e64860d16953f1cc6518d07b2c30a02937fb362563f8
+MRUBY_SHA256=e2ea271dbed14e9f2b33df773ae447b747dbc242ce2675022c0a57efea85a7b4
 
 MRUBY_GEMS=(
   mruby-compiler mruby-sprintf mruby-math mruby-string-ext mruby-array-ext
   mruby-enum-ext mruby-hash-ext mruby-numeric-ext mruby-symbol-ext
   mruby-object-ext mruby-error mruby-metaprog mruby-pack mruby-random
-  mruby-time mruby-exit
+  mruby-time mruby-exit mruby-bigint
 )
 
 # MRB_INT64 is required by the ABI (Integer crosses as i64) and MRB_UTF8_STRING makes String#size and friends count characters, matching Go's UTF-8 strings.
-MRUBY_DEFINES=(MRB_INT64 MRB_UTF8_STRING)
+# MRB_NO_BOXING follows from MRB_INT64 on a 32-bit target: mruby 4.0.0 refuses every other boxing mode there (include/mrbconf.h, "MRB_INT64 on 32-bit requires MRB_NO_BOXING").
+MRUBY_DEFINES=(MRB_INT64 MRB_UTF8_STRING MRB_NO_BOXING)
 
 EH_FLAGS=(-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false)
+
+# A C switch is as many nested wasm blocks as it has cases, dewasm renders each as a Go `for` block, and a `for` block costs two of the 1000 nested scopes go/parser allows, so 499 levels is the hard limit for the generated file.
+# mruby 4.0.0's parser reduces 692 grammar rules in one switch and lands at 545 levels, which `go vet` (and `go test`, which vets) refuses to read at all: "exceeded max scope depth during object resolution".
+# Compiling that one file without jump tables brings it to 336 levels; every other function in the module is far below the limit, and the interpreter loop's own dispatch keeps its jump table.
+PARSER_SOURCE=mrbgems/mruby-compiler/core/y.tab.c
+PARSER_FLAGS=(-fno-jump-tables)
 
 # -O0 is not an option: the interpreter loop exceeds engine limits without optimization.
 OPT_FLAGS=(-O2)
@@ -60,7 +68,7 @@ require_tool shasum "shasum is part of the base system"
 file_sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 tree_sha() { find "$1" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1; }
 
-key="mruby:$MRUBY_SHA256 gems:${MRUBY_GEMS[*]} defines:${MRUBY_DEFINES[*]} stack:$STACK_SIZE"
+key="mruby:$MRUBY_SHA256 gems:${MRUBY_GEMS[*]} defines:${MRUBY_DEFINES[*]} parser:${PARSER_FLAGS[*]} stack:$STACK_SIZE"
 key="$key zig:$(zig version) shim:$(file_sha tools/shim/shim.c)"
 key="$key config:$(file_sha tools/mruby_build_config.rb) puts:$(tree_sha tools/mruby-wasi-puts)"
 
@@ -97,9 +105,12 @@ zig cc -target wasm32-wasi "${OPT_FLAGS[@]}" "${EH_FLAGS[@]}" -c -o "$cache/rt.o
 cc_wrapper="$cache/mruby-cc.sh"
 {
   echo '#!/bin/sh'
+  echo '# The parser is compiled with flags of its own; PARSER_FLAGS in tools/build-wasm.sh says why.'
+  echo 'parser_flags='
+  printf 'case "$*" in *%s*) parser_flags="%s" ;; esac\n' "$PARSER_SOURCE" "${PARSER_FLAGS[*]}"
   printf 'exec zig cc -target wasm32-wasi'
   printf ' %s' "${OPT_FLAGS[@]}" "${EH_FLAGS[@]}"
-  printf ' "$@"\n'
+  printf ' $parser_flags "$@"\n'
 } >"$cc_wrapper"
 
 ar_wrapper="$cache/mruby-ar.sh"

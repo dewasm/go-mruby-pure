@@ -119,16 +119,16 @@ func (v *Value) IsNil() bool {
 	return v == nil || v.kind == mrubyvm.KindNil
 }
 
-// Int is the value of an Integer.
-func (v *Value) Int() (int64, error) {
+// AsInt is the value of an Integer.
+func (v *Value) AsInt() (int64, error) {
 	if v == nil || v.kind != mrubyvm.KindInt {
 		return 0, v.typeError("an Integer")
 	}
 	return v.i, nil
 }
 
-// Float is the value of a Float, or of an Integer widened to one.
-func (v *Value) Float() (float64, error) {
+// AsFloat is the value of a Float, or of an Integer widened to one.
+func (v *Value) AsFloat() (float64, error) {
 	if v == nil {
 		return 0, v.typeError("a Float")
 	}
@@ -141,8 +141,8 @@ func (v *Value) Float() (float64, error) {
 	return 0, v.typeError("a Float")
 }
 
-// Bool is the value of true or false. Every other value, nil included, is an error rather than Ruby's truthiness.
-func (v *Value) Bool() (bool, error) {
+// AsBool is the value of true or false. Every other value, nil included, is an error rather than Ruby's truthiness.
+func (v *Value) AsBool() (bool, error) {
 	if v == nil {
 		return false, v.typeError("true or false")
 	}
@@ -155,23 +155,27 @@ func (v *Value) Bool() (bool, error) {
 	return false, v.typeError("true or false")
 }
 
-// Text is the bytes of a String or the name of a Symbol.
-func (v *Value) Text() (string, error) {
-	if v == nil {
+// AsString is the bytes of a String. A Symbol is not one; [Value.AsSymbol] takes that.
+func (v *Value) AsString() (string, error) {
+	if v == nil || v.kind != mrubyvm.KindString {
 		return "", v.typeError("a String")
 	}
-	switch v.kind {
-	case mrubyvm.KindString, mrubyvm.KindSymbol:
-		return v.s, nil
+	return v.s, nil
+}
+
+// AsSymbol is the name of a Symbol.
+func (v *Value) AsSymbol() (Symbol, error) {
+	if v == nil || v.kind != mrubyvm.KindSymbol {
+		return "", v.typeError("a Symbol")
 	}
-	return "", v.typeError("a String")
+	return Symbol(v.s), nil
 }
 
 func (v *Value) typeError(want string) error {
 	return fmt.Errorf("mruby: the value is %s, not %s", v.Type(), want)
 }
 
-// String is the value's Ruby to_s.
+// String is the value's Ruby to_s, which Ruby code may override; the bytes of a String are read with [Value.AsString].
 // It is best effort, for messages and debugging: an exception raised on the way out becomes the returned text.
 func (v *Value) String() string {
 	if v == nil {
@@ -263,18 +267,18 @@ func (v *Value) Release() {
 	v.vm.in.ReleaseRef(v.ref)
 }
 
-// Export converts the value to Go: nil, bool, int64, float64, string, Symbol, []any for an Array and map[any]any for a Hash, recursively.
+// GoValue converts the value to Go: nil, bool, int64, float64, string, Symbol, []any for an Array and map[any]any for a Hash, recursively.
 // A value with no Go counterpart stays a *Value where it sits, and so does a Hash key that Go cannot use as a map key.
 // A structure that contains itself is an error rather than an endless walk.
-func (v *Value) Export() (any, error) {
+func (v *Value) GoValue() (any, error) {
 	if v == nil {
 		return nil, nil
 	}
 	defer v.vm.enter()()
-	return v.vm.export(v, nil)
+	return v.vm.goValue(v, nil)
 }
 
-func (vm *VM) export(v *Value, path []int64) (any, error) {
+func (vm *VM) goValue(v *Value, path []int64) (any, error) {
 	switch v.kind {
 	case mrubyvm.KindNil:
 		return nil, nil
@@ -299,9 +303,9 @@ func (vm *VM) export(v *Value, path []int64) (any, error) {
 	}
 	switch v.kind {
 	case mrubyvm.KindArray:
-		return vm.exportArray(v, path)
+		return vm.goSlice(v, path)
 	case mrubyvm.KindHash:
-		return vm.exportHash(v, path)
+		return vm.goMap(v, path)
 	}
 	return v, nil
 }
@@ -314,13 +318,13 @@ func (vm *VM) descend(v *Value, path []int64) ([]int64, error) {
 	}
 	for _, seen := range path {
 		if seen == id {
-			return nil, fmt.Errorf("mruby: cannot export the %s with object_id %d: it contains itself", v.Type(), id)
+			return nil, fmt.Errorf("mruby: cannot convert the %s with object id %d: it contains itself", v.Type(), id)
 		}
 	}
 	return append(path[:len(path):len(path)], id), nil
 }
 
-func (vm *VM) exportArray(v *Value, path []int64) (any, error) {
+func (vm *VM) goSlice(v *Value, path []int64) (any, error) {
 	path, err := vm.descend(v, path)
 	if err != nil {
 		return nil, err
@@ -339,7 +343,7 @@ func (vm *VM) exportArray(v *Value, path []int64) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		x, err := vm.export(elem, path)
+		x, err := vm.goValue(elem, path)
 		if err != nil {
 			return nil, err
 		}
@@ -349,7 +353,7 @@ func (vm *VM) exportArray(v *Value, path []int64) (any, error) {
 	return out, nil
 }
 
-func (vm *VM) exportHash(v *Value, path []int64) (any, error) {
+func (vm *VM) goMap(v *Value, path []int64) (any, error) {
 	path, err := vm.descend(v, path)
 	if err != nil {
 		return nil, err
@@ -385,11 +389,11 @@ func (vm *VM) exportHash(v *Value, path []int64) (any, error) {
 			vm.in.ReleaseRef(kraw.Ref)
 		}
 
-		ek, err := vm.export(key, path)
+		ek, err := vm.goValue(key, path)
 		if err != nil {
 			return nil, err
 		}
-		ev, err := vm.export(value, path)
+		ev, err := vm.goValue(value, path)
 		if err != nil {
 			return nil, err
 		}
@@ -403,9 +407,9 @@ func (vm *VM) exportHash(v *Value, path []int64) (any, error) {
 	return out, nil
 }
 
-// releaseUnless drops the reference behind a value that the exported tree did not keep.
-func releaseUnless(v *Value, exported any) {
-	if kept, ok := exported.(*Value); ok && kept == v {
+// releaseUnless drops the reference behind a value that the converted tree did not keep.
+func releaseUnless(v *Value, converted any) {
+	if kept, ok := converted.(*Value); ok && kept == v {
 		return
 	}
 	v.Release()

@@ -48,7 +48,7 @@ func ExampleVM_DefineClass() {
 		log.Fatal(err)
 	}
 	err = greeter.DefineMethod("greet", func(c *mruby.Call) (any, error) {
-		name, err := c.Arg(0).Text()
+		name, err := c.Arg(0).AsString()
 		if err != nil {
 			return nil, mruby.Raise("TypeError", "greet wants a name")
 		}
@@ -78,22 +78,43 @@ func ExampleVM_DefineClass() {
 	// hello, Go
 }
 
-func ExampleValue_Export() {
+func ExampleValue_GoValue() {
 	vm, err := mruby.New()
 	if err != nil {
 		log.Fatal(err)
 	}
-	v, err := vm.Eval(`{"name" => "mruby", "versions" => [3, 4], :ok => true}`)
+	v, err := vm.Eval(`{"name" => "mruby", "versions" => [4, 0], :ok => true}`)
 	if err != nil {
 		log.Fatal(err)
 	}
-	x, err := v.Export()
+	x, err := v.GoValue()
 	if err != nil {
 		log.Fatal(err)
 	}
 	m := x.(map[any]any)
 	fmt.Println(m["name"], m["versions"], m[mruby.Symbol("ok")])
-	// Output: mruby [3 4] true
+	// Output: mruby [4 0] true
+}
+
+func ExampleVM_ToValue() {
+	vm, err := mruby.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	hash, err := vm.ToValue(map[string]any{"one": 1})
+	if err != nil {
+		log.Fatal(err)
+	}
+	size, err := hash.Call("size")
+	if err != nil {
+		log.Fatal(err)
+	}
+	n, err := size.AsInt()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(hash.Inspect(), n)
+	// Output: {"one" => 1} 1
 }
 
 func ExampleRubyError() {

@@ -18,6 +18,28 @@ var (
 	stringMapType = reflect.TypeOf(map[string]any(nil))
 )
 
+// ToValue converts a Go value into a Ruby one by the conversions in the package documentation, which is the same table an argument crosses by.
+// An immediate stays an immediate; an Array or a Hash becomes an object of the interpreter's, which the returned Value holds the reference to.
+// A *Value is answered as it is.
+func (vm *VM) ToValue(x any) (*Value, error) {
+	if v, ok := x.(*Value); ok {
+		if _, err := v.arg(vm); err != nil {
+			return nil, err
+		}
+		return v, nil
+	}
+	defer vm.enter()()
+
+	b := builder{vm: vm}
+	defer b.done()
+
+	a, err := b.convert(reflect.ValueOf(x))
+	if err != nil {
+		return nil, err
+	}
+	return b.keep(a), nil
+}
+
 // arg is one entry of the interpreter's argument scratch.
 type arg struct {
 	kind mrubyvm.Kind
@@ -162,29 +184,11 @@ func (b *builder) array(rv reflect.Value) (arg, error) {
 		}
 		elems[i] = a
 	}
-	ref, err := b.instance(&b.vm.arrayClass, "Array")
-	if err != nil {
-		return arg{}, err
-	}
-	if len(elems) > 0 {
-		if err := b.vm.in.ArgsReset(); err != nil {
-			return arg{}, err
-		}
-		for _, a := range elems {
-			if err := a.push(b.vm.in); err != nil {
-				return arg{}, err
-			}
-		}
-		if _, err := b.vm.in.Call(ref, "push", false); err != nil {
-			return arg{}, b.vm.wrap(err)
-		}
-	}
-	return arg{kind: mrubyvm.KindArray, ref: ref}, nil
+	return b.container(elems, b.vm.in.NewArray, "Array")
 }
 
 func (b *builder) hash(rv reflect.Value) (arg, error) {
-	type pair struct{ key, value arg }
-	pairs := make([]pair, 0, rv.Len())
+	pairs := make([]arg, 0, 2*rv.Len())
 	for iter := rv.MapRange(); iter.Next(); {
 		key, err := b.convert(iter.Key())
 		if err != nil {
@@ -194,47 +198,45 @@ func (b *builder) hash(rv reflect.Value) (arg, error) {
 		if err != nil {
 			return arg{}, err
 		}
-		pairs = append(pairs, pair{key, value})
+		pairs = append(pairs, key, value)
 	}
-	ref, err := b.instance(&b.vm.hashClass, "Hash")
-	if err != nil {
-		return arg{}, err
-	}
-	for _, p := range pairs {
-		if err := b.vm.in.ArgsReset(); err != nil {
-			return arg{}, err
-		}
-		if err := p.key.push(b.vm.in); err != nil {
-			return arg{}, err
-		}
-		if err := p.value.push(b.vm.in); err != nil {
-			return arg{}, err
-		}
-		if _, err := b.vm.in.Call(ref, "[]=", false); err != nil {
-			return arg{}, b.vm.wrap(err)
-		}
-	}
-	return arg{kind: mrubyvm.KindHash, ref: ref}, nil
+	return b.container(pairs, b.vm.in.NewHash, "Hash")
 }
 
-// instance makes an empty container of a core class, keeping the class reference for the next time.
-func (b *builder) instance(cached *int32, name string) (int32, error) {
-	class, err := b.vm.constant(cached, name)
-	if err != nil {
-		return 0, err
-	}
+// container has the interpreter build an Array or a Hash out of the pieces, which cross in the argument scratch.
+// The reference is the builder's until done gives it back, so nesting one container in another needs no other bookkeeping.
+func (b *builder) container(pieces []arg, build func(bool) (mrubyvm.Value, error), name string) (arg, error) {
 	if err := b.vm.in.ArgsReset(); err != nil {
-		return 0, err
+		return arg{}, err
 	}
-	raw, err := b.vm.in.Call(class, "new", true)
+	for _, piece := range pieces {
+		if err := piece.push(b.vm.in); err != nil {
+			return arg{}, err
+		}
+	}
+	raw, err := build(true)
 	if err != nil {
-		return 0, b.vm.wrap(err)
+		return arg{}, b.vm.wrap(err)
 	}
 	if raw.Ref == 0 {
-		return 0, fmt.Errorf("mruby: the interpreter would not hold on to a new %s", name)
+		return arg{}, fmt.Errorf("mruby: the interpreter would not hold on to a new %s", name)
 	}
 	b.temp = append(b.temp, raw.Ref)
-	return raw.Ref, nil
+	return arg{kind: raw.Kind, ref: raw.Ref}, nil
+}
+
+// keep turns a converted argument into a Value that owns what it holds, taking the reference behind it out of the builder's hands.
+func (b *builder) keep(a arg) *Value {
+	if a.ref == 0 {
+		return &Value{vm: b.vm, kind: a.kind, i: a.i, f: a.f, s: a.s}
+	}
+	for i, ref := range b.temp {
+		if ref == a.ref {
+			b.temp = append(b.temp[:i], b.temp[i+1:]...)
+			break
+		}
+	}
+	return b.vm.handle(a.kind, a.ref)
 }
 
 // crosses reports whether a Go type is one this package converts, which is what a host function's parameters and result are restricted to.
@@ -265,24 +267,25 @@ func (vm *VM) fromValue(v *Value, t reflect.Type) (reflect.Value, error) {
 		}
 		return reflect.ValueOf(v), nil
 	case symbolType:
-		if v.Type() != TypeSymbol {
-			return reflect.Value{}, v.typeError("a Symbol")
+		s, err := v.AsSymbol()
+		if err != nil {
+			return reflect.Value{}, err
 		}
-		return reflect.ValueOf(Symbol(v.s)), nil
+		return reflect.ValueOf(s), nil
 	case anyType, anySliceType, anyMapType, stringMapType:
-		return vm.fromExported(v, t)
+		return vm.fromGoValue(v, t)
 	}
 
 	out := reflect.New(t).Elem()
 	switch t.Kind() {
 	case reflect.Bool:
-		b, err := v.Bool()
+		b, err := v.AsBool()
 		if err != nil {
 			return reflect.Value{}, err
 		}
 		out.SetBool(b)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		n, err := v.Int()
+		n, err := v.AsInt()
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -291,7 +294,7 @@ func (vm *VM) fromValue(v *Value, t reflect.Type) (reflect.Value, error) {
 		}
 		out.SetInt(n)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		n, err := v.Int()
+		n, err := v.AsInt()
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -300,7 +303,7 @@ func (vm *VM) fromValue(v *Value, t reflect.Type) (reflect.Value, error) {
 		}
 		out.SetUint(uint64(n))
 	case reflect.Float32, reflect.Float64:
-		f, err := v.Float()
+		f, err := v.AsFloat()
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -309,27 +312,28 @@ func (vm *VM) fromValue(v *Value, t reflect.Type) (reflect.Value, error) {
 		}
 		out.SetFloat(f)
 	case reflect.String:
-		s, err := v.Text()
+		// A Symbol reaches a string parameter as its name; a parameter typed Symbol is what tells the two apart.
+		if k := v.Type(); k != TypeString && k != TypeSymbol {
+			return reflect.Value{}, v.typeError("a String")
+		}
+		out.SetString(v.s)
+	case reflect.Slice:
+		s, err := v.AsString()
 		if err != nil {
 			return reflect.Value{}, err
 		}
-		out.SetString(s)
-	case reflect.Slice:
-		if v.Type() != TypeString {
-			return reflect.Value{}, v.typeError("a String")
-		}
-		out.SetBytes([]byte(v.s))
+		out.SetBytes([]byte(s))
 	default:
 		return reflect.Value{}, fmt.Errorf("mruby: a Go %s does not cross from Ruby", t)
 	}
 	return out, nil
 }
 
-func (vm *VM) fromExported(v *Value, t reflect.Type) (reflect.Value, error) {
+func (vm *VM) fromGoValue(v *Value, t reflect.Type) (reflect.Value, error) {
 	if v == nil {
 		return reflect.Zero(t), nil
 	}
-	x, err := vm.export(v, nil)
+	x, err := vm.goValue(v, nil)
 	if err != nil {
 		return reflect.Value{}, err
 	}
@@ -364,7 +368,7 @@ func (vm *VM) fromExported(v *Value, t reflect.Type) (reflect.Value, error) {
 			case Symbol:
 				out[string(key)] = value
 			default:
-				return reflect.Value{}, fmt.Errorf("mruby: a Hash key that exports as %T does not fit a Go map[string]any", key)
+				return reflect.Value{}, fmt.Errorf("mruby: a Hash key that converts to a Go %T does not fit a map[string]any", key)
 			}
 		}
 		return reflect.ValueOf(out), nil

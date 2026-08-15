@@ -66,7 +66,7 @@ func TestEvalImmediates(t *testing.T) {
 func TestIntegerRoundTrip(t *testing.T) {
 	vm := newVM(t)
 	for _, n := range []int64{0, 1, -1, math.MaxInt64, math.MinInt64, math.MaxInt32 + 1} {
-		got, err := identity(t, vm, n).Int()
+		got, err := identity(t, vm, n).AsInt()
 		if err != nil {
 			t.Fatalf("Int of %d: %v", n, err)
 		}
@@ -79,7 +79,7 @@ func TestIntegerRoundTrip(t *testing.T) {
 func TestFloatRoundTrip(t *testing.T) {
 	vm := newVM(t)
 	for _, f := range []float64{0, math.Copysign(0, -1), 1.5, -1.5, math.MaxFloat64, math.SmallestNonzeroFloat64, math.Inf(1), math.Inf(-1)} {
-		got, err := identity(t, vm, f).Float()
+		got, err := identity(t, vm, f).AsFloat()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +91,7 @@ func TestFloatRoundTrip(t *testing.T) {
 		}
 	}
 
-	got, err := identity(t, vm, math.NaN()).Float()
+	got, err := identity(t, vm, math.NaN()).AsFloat()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestFloatRoundTrip(t *testing.T) {
 func TestStringAndSymbolRoundTrip(t *testing.T) {
 	vm := newVM(t)
 	for _, s := range []string{"", "ascii", "日本語 と emoji 🍣", "a\x00b", "\xff\xfe raw bytes", strings.Repeat("long", 1000)} {
-		got, err := identity(t, vm, s).Text()
+		got, err := identity(t, vm, s).AsString()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -116,26 +116,26 @@ func TestStringAndSymbolRoundTrip(t *testing.T) {
 	if sym.Type() != TypeSymbol {
 		t.Fatalf("a Symbol crossed as %v", sym.Type())
 	}
-	if got, _ := sym.Text(); got != "a symbol" {
+	if got, _ := sym.AsSymbol(); got != Symbol("a symbol") {
 		t.Errorf("the Symbol came back as %q", got)
 	}
 	back := mustEval(t, vm, ":round_trip")
 	if back.Type() != TypeSymbol {
 		t.Fatalf("a Symbol came back as %v", back.Type())
 	}
-	x, err := back.Export()
+	x, err := back.GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if x != Symbol("round_trip") {
-		t.Errorf("Export of a Symbol = %#v", x)
+		t.Errorf("GoValue of a Symbol = %#v", x)
 	}
 }
 
 func TestBytesCrossAsString(t *testing.T) {
 	vm := newVM(t)
 	v := identity(t, vm, []byte{0, 1, 255})
-	got, err := v.Text()
+	got, err := v.AsString()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestBytesCrossAsString(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if size, _ := n.Int(); size != 3 {
+	if size, _ := n.AsInt(); size != 3 {
 		t.Errorf("bytesize = %d, want 3", size)
 	}
 }
@@ -160,7 +160,7 @@ func TestCallOnValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := got.Int(); n != 42 {
+	if n, _ := got.AsInt(); n != 42 {
 		t.Errorf("40 + 2 = %d", n)
 	}
 
@@ -169,7 +169,7 @@ func TestCallOnValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x, err := sorted.Export()
+	x, err := sorted.GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestCallCompositeArguments(t *testing.T) {
 	vm := newVM(t)
 
 	v := identity(t, vm, []any{1, "two", Symbol("three"), []any{4, nil}, true})
-	x, err := v.Export()
+	x, err := v.GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestCallCompositeArguments(t *testing.T) {
 	}
 
 	h := identity(t, vm, map[any]any{"a": 1, Symbol("b"): []any{2}, 3: 4.5})
-	x, err = h.Export()
+	x, err = h.GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestCallCompositeArguments(t *testing.T) {
 	}
 
 	// A map[string]any crosses with String keys.
-	x, err = identity(t, vm, map[string]any{"k": "v"}).Export()
+	x, err = identity(t, vm, map[string]any{"k": "v"}).GoValue()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,10 +212,82 @@ func TestCallCompositeArguments(t *testing.T) {
 	}
 }
 
+func TestToValueCrossesTheArgumentTypes(t *testing.T) {
+	vm := newVM(t)
+
+	for _, c := range []struct {
+		x    any
+		want Type
+		text string
+	}{
+		{nil, TypeNil, "nil"},
+		{true, TypeBool, "true"},
+		{7, TypeInteger, "7"},
+		{uint8(7), TypeInteger, "7"},
+		{2.5, TypeFloat, "2.5"},
+		{"text", TypeString, `"text"`},
+		{Symbol("sym"), TypeSymbol, ":sym"},
+		{[]any{1, "two"}, TypeArray, `[1, "two"]`},
+		{map[any]any{Symbol("k"): 1}, TypeHash, "{k: 1}"},
+		{map[string]any{"k": []any{1}}, TypeHash, `{"k" => [1]}`},
+	} {
+		v, err := vm.ToValue(c.x)
+		if err != nil {
+			t.Fatalf("ToValue(%#v): %v", c.x, err)
+		}
+		if got := v.Type(); got != c.want {
+			t.Errorf("ToValue(%#v).Type() = %v, want %v", c.x, got, c.want)
+		}
+		if got := v.Inspect(); got != c.text {
+			t.Errorf("ToValue(%#v).Inspect() = %s, want %s", c.x, got, c.text)
+		}
+	}
+
+	// A container is an object of the interpreter's: Ruby answers its methods and it crosses back as itself.
+	list, err := vm.ToValue([]any{3, 1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sorted, err := list.Call("sort")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := sorted.GoValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalAny(x, []any{int64(1), int64(2), int64(3)}) {
+		t.Errorf("the Array made by ToValue sorted to %#v", x)
+	}
+	if got := identity(t, vm, list).Inspect(); got != "[3, 1, 2]" {
+		t.Errorf("the Array made by ToValue crossed back as %s", got)
+	}
+
+	// A Value is already one, so it is answered as it is.
+	again, err := vm.ToValue(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != list {
+		t.Error("ToValue of a Value made a second one")
+	}
+	list.Release()
+	if _, err := vm.ToValue(list); err == nil {
+		t.Error("ToValue of a released value succeeded")
+	}
+
+	if _, err := vm.ToValue(struct{ A int }{1}); err == nil {
+		t.Error("ToValue of a struct succeeded")
+	}
+	if _, err := vm.ToValue(uint64(math.MaxInt64) + 1); err == nil {
+		t.Error("ToValue of a uint64 past MaxInt64 succeeded")
+	}
+}
+
 func TestUnsignedArgumentOverflow(t *testing.T) {
 	vm := newVM(t)
 
-	if n, _ := identity(t, vm, uint64(math.MaxInt64)).Int(); n != math.MaxInt64 {
+	if n, _ := identity(t, vm, uint64(math.MaxInt64)).AsInt(); n != math.MaxInt64 {
 		t.Errorf("uint64(MaxInt64) = %d", n)
 	}
 	if _, err := vm.Call(nil, "identity", uint64(math.MaxInt64)+1); err == nil {
@@ -358,7 +430,7 @@ func TestVMsAreIndependent(t *testing.T) {
 	}
 }
 
-// equalAny compares exported trees, where the only composites are []any and map[any]any.
+// equalAny compares converted trees, where the only composites are []any and map[any]any.
 func equalAny(a, b any) bool {
 	switch a := a.(type) {
 	case []any:
@@ -388,10 +460,10 @@ func equalAny(a, b any) bool {
 	return a == b
 }
 
-func TestTheVMsOwnHelpersLeaveNoTrace(t *testing.T) {
+// Building a container, calling on an immediate receiver and inspecting one are the crossings that once ran Ruby of the package's own; they take the guest ABI now, and the interpreter is to show no sign of them.
+func TestTheVMsOwnCrossingsRunNoRuby(t *testing.T) {
 	vm := newVM(t)
 
-	// Building an Array argument and calling on an immediate receiver both make the VM evaluate helpers of its own.
 	if _, err := vm.Call(nil, "identity", []any{1, map[any]any{"k": "v"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -401,8 +473,14 @@ func TestTheVMsOwnHelpersLeaveNoTrace(t *testing.T) {
 	if got := mustEval(t, vm, "'text'").Inspect(); got != `"text"` {
 		t.Fatalf("Inspect of a String = %s", got)
 	}
-	// The helpers are evaluated in the same compiler context as the caller's code, so a local variable of theirs would be one of the caller's too.
+	// Anything the package evaluated would share the caller's compiler context, so a local variable of its own would be one of the caller's too.
 	if got := mustEval(t, vm, "local_variables.inspect").String(); got != "[]" {
 		t.Errorf("the eval context carries local variables: %s", got)
+	}
+	// The containers are built by the interpreter itself, so redefining the Ruby side of it changes nothing.
+	mustEval(t, vm, "class Array; def self.new(*); raise 'Array.new is not how a container is built'; end; end")
+	mustEval(t, vm, "class Hash; def self.new(*); raise 'Hash.new is not how a container is built'; end; end")
+	if _, err := vm.ToValue([]any{1, map[string]any{"k": "v"}}); err != nil {
+		t.Errorf("building a container went through Ruby: %v", err)
 	}
 }

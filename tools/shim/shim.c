@@ -670,6 +670,18 @@ DM_EXPORT(dm_registry_len)(void)
   return (int32_t)RARRAY_LEN(root_get(ROOT_REGISTRY));
 }
 
+/*
+** Ruby object identity, read from C instead of by sending object_id, so that a Ruby-level override of object_id or __id__ cannot change what the host sees.
+** An unknown ref answers 0, which mrb_obj_id gives no live object.
+*/
+int64_t
+DM_EXPORT(dm_obj_id)(int32_t id)
+{
+  mrb_value v;
+  if (!reg_get(id, &v)) return 0;
+  return (int64_t)mrb_obj_id(v);
+}
+
 /* --- argument scratch ---------------------------------------------------- */
 
 static void
@@ -732,6 +744,63 @@ DM_EXPORT(dm_args_push_ref)(int32_t id)
   mrb_value v = mrb_nil_value();
   reg_get(id, &v);
   args_push(v);
+}
+
+/* --- values built from the scratch --------------------------------------- */
+
+/* The scratch frame's one value becomes the result capture: it is how an immediate gets a ref of its own and how a ref reads back as an immediate. */
+int32_t
+DM_EXPORT(dm_capture_arg)(void)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value args = consume_args();
+  if (!mrb_array_p(args) || RARRAY_LEN(args) != 1) {
+    return fail_internal("dm_capture_arg: the scratch does not hold exactly one value");
+  }
+  capture_result(mrb_ary_ref(mrb, args, 0));
+  mrb_ary_resize(mrb, args, 0);
+  return DM_OK;
+}
+
+static mrb_value
+body_new_array(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  return mrb_ary_new_from_values(m, RARRAY_LEN(op->args), RARRAY_PTR(op->args));
+}
+
+/* The whole scratch frame becomes an Array. */
+int32_t
+DM_EXPORT(dm_new_array)(void)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  dm_op op = {NULL, 0, consume_args(), 0, 0, 0};
+  return finish_call(protected_run(body_new_array, &op), op.args);
+}
+
+static mrb_value
+body_new_hash(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_int n = RARRAY_LEN(op->args);
+  mrb_value hash = mrb_hash_new_capa(m, n / 2);
+  for (mrb_int i = 0; i < n; i += 2) {
+    mrb_hash_set(m, hash, mrb_ary_ref(m, op->args, i), mrb_ary_ref(m, op->args, i + 1));
+  }
+  return hash;
+}
+
+/* The whole scratch frame, taken as key/value pairs, becomes a Hash. */
+int32_t
+DM_EXPORT(dm_new_hash)(void)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value args = consume_args();
+  if (!mrb_array_p(args) || RARRAY_LEN(args) % 2 != 0) {
+    return fail_internal("dm_new_hash: the scratch does not hold key/value pairs");
+  }
+  dm_op op = {NULL, 0, args, 0, 0, 0};
+  return finish_call(protected_run(body_new_hash, &op), op.args);
 }
 
 /* --- structure access ---------------------------------------------------- */

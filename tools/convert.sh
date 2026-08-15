@@ -71,12 +71,50 @@ strip_unreachable() {
     ' mrubyvm/mruby_gen.go >mrubyvm/mruby_gen.go.stripped
     mv mrubyvm/mruby_gen.go.stripped mrubyvm/mruby_gen.go
     echo "convert: dropped $(wc -l <"$lines" | tr -d ' ') unreachable statements"
+    strip_unused_declarations "$vet" "$lines" || return 1
     go build ./... || {
       echo "convert: dropping unreachable statements broke the build" >&2
       return 1
     }
   done
   echo "convert: go vet still reports the generated file after 5 rounds" >&2
+  return 1
+}
+
+# A dropped statement can be the only reader of a local declaration, which Go then refuses to compile.
+# The compiler names each one, and a declaration it calls unused cannot be doing anything, so this drops exactly those, refuses any shape it was not built for, and repeats because one round can orphan the next.
+strip_unused_declarations() {
+  local build=$1 lines=$2 round
+  for round in 1 2 3 4 5; do
+    if go build ./mrubyvm >"$build" 2>&1; then
+      return 0
+    fi
+    grep -oE 'mruby_gen\.go:[0-9]+:[0-9]+: declared and not used' "$build" | cut -d: -f2 | sort -nu >"$lines"
+    if [ ! -s "$lines" ]; then
+      echo "convert: go build failed for something other than an unused declaration:" >&2
+      cat "$build" >&2
+      return 1
+    fi
+    awk -v list="$lines" '
+      BEGIN { while ((getline n < list) > 0) drop[n] = 1 }
+      NR in drop {
+        s = $0
+        sub(/^[ \t]+/, "", s)
+        if (s !~ /^var [A-Za-z_][A-Za-z_0-9]* [a-z0-9]+$/) {
+          printf "convert: unexpected unused declaration at line %d: %s\n", NR, s > "/dev/stderr"
+          bad = 1
+        }
+      }
+      END { exit bad }
+    ' mrubyvm/mruby_gen.go || return 1
+    awk -v list="$lines" '
+      BEGIN { while ((getline n < list) > 0) drop[n] = 1 }
+      !(NR in drop)
+    ' mrubyvm/mruby_gen.go >mrubyvm/mruby_gen.go.stripped
+    mv mrubyvm/mruby_gen.go.stripped mrubyvm/mruby_gen.go
+    echo "convert: dropped $(wc -l <"$lines" | tr -d ' ') unused declarations"
+  done
+  echo "convert: go build still reports unused declarations after 5 rounds" >&2
   return 1
 }
 
