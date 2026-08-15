@@ -23620,6 +23620,8 @@ L1:
 
 func (p *Mrubyvm) f222(l0 uint32) uint32 {
 	var l1 uint32
+	var s0_i32 uint32
+	_ = s0_i32
 	l1 = uint32(0)
 L1:
 	for {
