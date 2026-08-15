@@ -52,10 +52,12 @@ Measured on Apple M1 Pro (`go test -bench .`):
 
 | Benchmark | Time |
 | --- | --- |
-| `New` (fresh interpreter) | 0.80 ms |
-| `Eval` of an arithmetic expression | 3.4 µs |
-| Ruby calling a Go-defined method | 2.8 µs |
-| `fib(20)` in Ruby | 15 ms |
+| `New` (fresh interpreter) | 0.47 ms |
+| `Eval` of an arithmetic expression | 2.7 µs |
+| Ruby calling a Go-defined method | 1.7 µs |
+| `fib(20)` in Ruby | 9.4 ms |
+
+Integers within ±2³⁰ and all value moves take the interpreter's fast path; a wider Integer is an arbitrary-precision object inside Ruby, and carrying one across the Go boundary costs about a microsecond extra.
 
 ## Limits
 

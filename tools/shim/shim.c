@@ -25,10 +25,18 @@
 #include <mruby/string.h>
 #include <mruby/value.h>
 #include <mruby/variable.h>
+#ifdef MRB_USE_BIGINT
+/* mrb_bint_* is mruby's own internal header, not the public API: nothing else declares the bigint entry points the i64 ABI needs. */
+#include <mruby/internal.h>
+#endif
 
-/* The ABI passes Integer as i64 and Float as f64; mruby must be built to match (MRB_INT64, no MRB_USE_FLOAT32). */
-_Static_assert(sizeof(mrb_int) == 8, "mrb_int must be 64-bit: build with MRB_INT64");
+/* The ABI passes Float as f64, so mrb_float must be double in every configuration. */
 _Static_assert(sizeof(mrb_float) == 8, "mrb_float must be double: do not build with MRB_USE_FLOAT32");
+
+/* The ABI passes Integer as i64. Where mrb_int is narrower, mruby-bigint carries the rest of the range, so the gem is required there. */
+#if !defined(MRB_INT64) && !defined(MRB_USE_BIGINT)
+#error "an mrb_int narrower than 64-bit needs mruby-bigint: build the gem and define MRB_USE_BIGINT"
+#endif
 
 #define DM_EXPORT(name) __attribute__((export_name(#name), used)) name
 
@@ -183,6 +191,88 @@ frames_top(int slot, int32_t depth)
   return mrb_ary_ref(mrb, root_get(slot), depth - 1);
 }
 
+/* --- integers ------------------------------------------------------------ */
+
+/*
+** Integer crosses the boundary as i64 whatever mrb_int is.
+** Where mrb_int is narrower, the values between it and i64 cross as bigints, so every read goes through value_as_int64 and every write through int64_value.
+** An Integer past i64 has no representation in the ABI: it reads as kind other, which is where a bigint already landed when mrb_int was 64-bit.
+*/
+
+#ifdef MRB_USE_BIGINT
+typedef struct dm_bint {
+  mrb_value v;
+  int64_t out;
+  mrb_bool ok;
+} dm_bint;
+
+/* The magnitude is read unsigned: mruby 4.0.0's mrb_bint_as_int64 rejects 2**63 before it looks at the sign, so it cannot read INT64_MIN. */
+static mrb_bool
+bint_to_int64(mrb_state *m, mrb_value v, int64_t *out)
+{
+  mrb_bool neg = mrb_bint_sign(m, v) < 0;
+  uint64_t u = mrb_bint_as_uint64(m, neg ? mrb_bint_neg(m, v) : v);
+  uint64_t limit = neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
+  if (u > limit) return FALSE;
+  *out = neg ? (u == (uint64_t)INT64_MAX + 1 ? INT64_MIN : -(int64_t)u) : (int64_t)u;
+  return TRUE;
+}
+
+static mrb_value
+body_bint_as_int64(mrb_state *m, void *ud)
+{
+  dm_bint *b = (dm_bint*)ud;
+  b->ok = bint_to_int64(m, b->v, &b->out);
+  return mrb_nil_value();
+}
+
+/*
+** mrb_bint_as_uint64 raises past 2**64, and the accessors calling this run outside any protected frame.
+** mrb_bint_size is the size of the limb array, an upper bound on the magnitude, so within eight bytes the conversion cannot raise and runs directly: that is every Integer the ABI can carry, and mrb_protect_error costs more than the conversion.
+*/
+static mrb_bool
+bint_as_int64(mrb_value v, int64_t *out)
+{
+  if (mrb_bint_size(mrb, v) <= (mrb_int)sizeof(uint64_t)) return bint_to_int64(mrb, v, out);
+
+  dm_bint b = {v, 0, FALSE};
+  mrb_bool failed = FALSE;
+  mrb_protect_error(mrb, body_bint_as_int64, &b, &failed);
+  if (failed || !b.ok) return FALSE;
+  *out = b.out;
+  return TRUE;
+}
+#endif
+
+static mrb_bool
+value_as_int64(mrb_value v, int64_t *out)
+{
+  if (mrb_integer_p(v)) {
+    *out = (int64_t)mrb_integer(v);
+    return TRUE;
+  }
+#ifdef MRB_USE_BIGINT
+  if (mrb_bigint_p(v)) return bint_as_int64(v, out);
+#endif
+  return FALSE;
+}
+
+static mrb_value
+int64_value(int64_t v)
+{
+#ifdef MRB_INT64
+  return mrb_int_value(mrb, (mrb_int)v);
+#else
+  if (v >= MRB_INT_MIN && v <= MRB_INT_MAX) return mrb_int_value(mrb, (mrb_int)v);
+  /*
+  ** The magnitude goes through mrb_bint_new_uint64 and gets its sign back afterwards, rather than through mrb_bint_new_int64.
+  ** mruby 4.0.0's mrb_bint_new_int64 (mrbgems/mruby-bigint/core/bigint.c) hands an uninitialized mpz_t to mpz_realloc, which then writes the limbs through whatever pointer the stack held; the value reads back as 0.
+  */
+  mrb_value b = mrb_bint_new_uint64(mrb, v < 0 ? ~(uint64_t)v + 1 : (uint64_t)v);
+  return v < 0 ? mrb_bint_neg(mrb, b) : b;
+#endif
+}
+
 /* --- captures ------------------------------------------------------------ */
 
 static int32_t
@@ -197,6 +287,10 @@ value_kind(mrb_value v)
   case MRB_TT_SYMBOL: return DM_KIND_SYMBOL;
   case MRB_TT_ARRAY: return DM_KIND_ARRAY;
   case MRB_TT_HASH: return DM_KIND_HASH;
+  case MRB_TT_BIGINT: {
+    int64_t n;
+    return value_as_int64(v, &n) ? DM_KIND_INT : DM_KIND_OTHER;
+  }
   default: return DM_KIND_OTHER;
   }
 }
@@ -531,8 +625,9 @@ int64_t
 DM_EXPORT(dm_result_int)(void)
 {
   if (!mrb) return 0;
-  mrb_value v = root_get(ROOT_RESULT);
-  return mrb_integer_p(v) ? (int64_t)mrb_integer(v) : 0;
+  int64_t n = 0;
+  value_as_int64(root_get(ROOT_RESULT), &n);
+  return n;
 }
 
 double
@@ -714,7 +809,7 @@ void
 DM_EXPORT(dm_args_push_int)(int64_t v)
 {
   if (!mrb) return;
-  args_push(mrb_int_value(mrb, (mrb_int)v));
+  args_push(int64_value(v));
 }
 
 void
@@ -828,6 +923,14 @@ DM_EXPORT(dm_ary_get)(int32_t id, int64_t index)
   mrb_value v;
   if (!reg_get(id, &v)) return fail_internal("dm_ary_get: unknown ref");
   if (!mrb_array_p(v)) return fail_internal("dm_ary_get: ref is not an Array");
+#ifndef MRB_INT64
+  /* An index past mrb_int addresses no element, and Ruby reads any index out of range as nil. */
+  if (index < MRB_INT_MIN || index > MRB_INT_MAX) {
+    internal_error = NULL;
+    capture_result(mrb_nil_value());
+    return DM_OK;
+  }
+#endif
   dm_op op = {NULL, 0, mrb_nil_value(), id, 0, (mrb_int)index};
   return protected_run(body_ary_get, &op);
 }
@@ -991,8 +1094,10 @@ int64_t
 DM_EXPORT(dm_hostargs_int)(int32_t i)
 {
   mrb_value v;
-  if (!hostarg(i, &v) || !mrb_integer_p(v)) return 0;
-  return (int64_t)mrb_integer(v);
+  int64_t n = 0;
+  if (!hostarg(i, &v)) return 0;
+  value_as_int64(v, &n);
+  return n;
 }
 
 double

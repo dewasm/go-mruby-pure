@@ -36,6 +36,38 @@ func BenchmarkCallGoMethod(b *testing.B) {
 	}
 }
 
+// Float arithmetic in a loop: under word boxing on a 32-bit target every Float is a heap object, so this is where that shows.
+func BenchmarkLeibnizPi(b *testing.B) {
+	vm := newVM(b, WithStdout(nil), WithStderr(nil))
+	if _, err := vm.Eval(`
+def leibniz(n)
+  sum = 0.0
+  sign = 1.0
+  d = 1.0
+  i = 0
+  while i < n
+    sum += sign / d
+    sign = -sign
+    d += 2.0
+    i += 1
+  end
+  sum * 4.0
+end`); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v, err := vm.Call(nil, "leibniz", 2000)
+		if err != nil {
+			b.Fatal(err)
+		}
+		f, _ := v.AsFloat()
+		if f < 3.14 || f > 3.15 {
+			b.Fatalf("leibniz(2000) = %v", f)
+		}
+	}
+}
+
 func BenchmarkFib20(b *testing.B) {
 	vm := newVM(b, WithStdout(nil), WithStderr(nil))
 	if _, err := vm.Eval("def fib(n); n < 2 ? n : fib(n - 1) + fib(n - 2); end"); err != nil {
