@@ -1,6 +1,6 @@
 // Package mrubyvm is the low-level Go side of the mruby wasm ABI.
 //
-// mruby_gen.go, the dewasm translation of tools/cache/mruby_shim.wasm, declares this same package; the instance's linear memory, its bundled WASI and the runtime's trap/exit types are unexported, so glue reaching them has to live here.
+// mruby_gen.go, the dewasm translation of wasm/mruby.wasm, declares this same package; the instance's linear memory, its bundled WASI and the runtime's trap/exit types are unexported, so glue reaching them has to live here.
 // Everything below is a thin wrapper over one `dm_*` guest export: no value caching, no type coercion, no object lifetime management beyond the ref queue.
 package mrubyvm
 

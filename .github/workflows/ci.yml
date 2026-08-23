@@ -40,11 +40,21 @@ jobs:
         with:
           ruby-version: "3.3"
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check out dewasm at the pinned revision
+      - name: Read the pinned dewasm revision
+        id: dewasm
+        run: echo "revision=$(cat DEWASM_REVISION)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        id: dewasm-cache
+        with:
+          path: ~/.dewasm
+          key: dewasm-${{ runner.os }}-${{ steps.dewasm.outputs.revision }}
+      - name: Build dewasm at the pinned revision
+        if: steps.dewasm-cache.outputs.cache-hit != 'true'
         run: |
-          rev=$(sed -n 's/^# Pinned dewasm revision: //p' tools/convert.sh)
-          git clone https://github.com/dewasm/dewasm ../dewasm
-          git -C ../dewasm checkout "$rev"
-      - run: tools/build-wasm.sh
-      - run: tools/convert.sh
+          cargo install --git https://github.com/dewasm/dewasm \
+            --rev "${{ steps.dewasm.outputs.revision }}" --locked \
+            --root ~/.dewasm dewasm
+      - name: Export DEWASM_BIN
+        run: echo "DEWASM_BIN=$HOME/.dewasm/bin/dewasm" >> "$GITHUB_ENV"
+      - run: make
       - run: git diff --exit-code -- mrubyvm/

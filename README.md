@@ -66,8 +66,7 @@ The public API is a thin layer over that generated interpreter; there is no runt
 Regenerating the interpreter (only needed when changing the shim, the gem set, or the dewasm revision):
 
 ```console
-$ tools/build-wasm.sh   # needs zig, ruby, rake; reproducible byte for byte
-$ tools/convert.sh      # needs a dewasm checkout; pins its revision
+$ make   # needs zig, ruby, rake, and a built dewasm (DEWASM_BIN, default ../dewasm/target/release/dewasm)
 ```
 
 ## Performance
