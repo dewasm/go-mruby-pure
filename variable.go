@@ -113,11 +113,8 @@ func constPath(path string) ([]string, error) {
 	return segments, nil
 }
 
-// GlobalVar reads the global variable name, which starts with `$`; one that was never set reads as Ruby nil.
+// GlobalVar reads the global variable name; the name crosses verbatim, `$` included, and one that was never set reads as Ruby nil.
 func (vm *VM) GlobalVar(name string) (*Value, error) {
-	if err := checkGlobalVarName(name); err != nil {
-		return nil, err
-	}
 	defer vm.enter()()
 
 	raw, err := vm.in.GlobalGet(name, false)
@@ -127,20 +124,10 @@ func (vm *VM) GlobalVar(name string) (*Value, error) {
 	return vm.capture(raw)
 }
 
-// SetGlobalVar stores value in the global variable name, which starts with `$`.
+// SetGlobalVar stores value in the global variable name; the name crosses verbatim, `$` included.
 func (vm *VM) SetGlobalVar(name string, value any) error {
-	if err := checkGlobalVarName(name); err != nil {
-		return err
-	}
 	defer vm.enter()()
 	return vm.store(value, func() error { return vm.in.GlobalSet(name) })
-}
-
-func checkGlobalVarName(name string) error {
-	if !strings.HasPrefix(name, "$") {
-		return fmt.Errorf("mruby: %q is not a global variable name: it does not start with $", name)
-	}
-	return nil
 }
 
 // InstanceVar reads the instance variable name from the value; the name crosses verbatim, `@` included, and one that was never set reads as Ruby nil.

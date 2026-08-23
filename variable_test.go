@@ -2,7 +2,6 @@ package mruby
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -122,12 +121,16 @@ func TestGlobalVarRoundTrip(t *testing.T) {
 		t.Errorf("$never_set = %s, want nil", unset.Inspect())
 	}
 
-	// The `$` is checked here rather than in the interpreter.
-	if _, err := vm.GlobalVar("from_go"); err == nil || !strings.Contains(err.Error(), "$") {
-		t.Errorf("GlobalVar(\"from_go\") = %v", err)
+	// The name crosses as it is: one without `$` names a global Ruby syntax cannot express, so it is reachable from Go and not from Ruby.
+	if err := vm.SetGlobalVar("from_go", 1); err != nil {
+		t.Fatal(err)
 	}
-	if err := vm.SetGlobalVar("from_go", 1); err == nil || !strings.Contains(err.Error(), "$") {
-		t.Errorf("SetGlobalVar(\"from_go\") = %v", err)
+	bare, err := vm.GlobalVar("from_go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bare.String(); got != "1" {
+		t.Errorf("GlobalVar(\"from_go\") = %s, want 1", got)
 	}
 }
 
