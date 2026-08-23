@@ -14,7 +14,6 @@
 # Under a profile whose mrb_int is 32-bit it also carries the upper half of the ABI's i64 Integer range, so it is required there rather than merely useful.
 #
 # Re-running is a no-op while tools/cache/mruby_shim.stamp matches the inputs; FORCE=1 rebuilds from a clean tree, which is what the byte-identical rebuild is verified with.
-# A change to MRUBY_DEFINES needs FORCE=1: mruby's rake build tracks source timestamps and not compiler flags, so an incremental run keeps objects compiled with the old defines while the shim is compiled with the new ones, and the two then disagree about the layout of mrb_state.
 
 set -euo pipefail
 
@@ -118,9 +117,13 @@ require_tool shasum "shasum is part of the base system"
 file_sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 tree_sha() { find "$1" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1; }
 
-key="mruby:$MRUBY_SHA256 gems:${MRUBY_GEMS[*]} defines:${MRUBY_DEFINES[*]} parser:${PARSER_FLAGS[*]} stack:$STACK_SIZE"
-key="$key opt:$OPT wasm-opt:$WASM_OPT zig:$(zig version) shim:$(file_sha tools/shim/shim.c)"
-key="$key config:$(file_sha tools/mruby_build_config.rb) puts:$(tree_sha tools/mruby-wasi-puts)"
+# libkey is every input of libmruby.a, and key adds what only the shim and the link consume, so an input cannot sit in one list and be missing from the other.
+libkey="mruby:$MRUBY_SHA256 gems:${MRUBY_GEMS[*]} defines:${MRUBY_DEFINES[*]} parser:${PARSER_FLAGS[*]} eh:${EH_FLAGS[*]} opt:$OPT"
+libkey="$libkey zig:$(zig version) config:$(file_sha tools/mruby_build_config.rb) puts:$(tree_sha tools/mruby-wasi-puts)"
+key="lib:[$libkey] stack:$STACK_SIZE wasm-opt:$WASM_OPT shim:$(file_sha tools/shim/shim.c)"
+
+# rake tracks source timestamps and not compiler flags, so the flags choose the build directory instead: a changed libkey starts in an empty directory, and returning to an earlier libkey finds its objects again.
+build_dir="$cache/mruby-build-$(printf '%s' "$libkey" | shasum -a 256 | cut -c1-12)"
 
 mkdir -p "$cache"
 if [ -z "${FORCE:-}" ] && [ -f "$out" ] && [ "$(cat "$stamp" 2>/dev/null || true)" = "$key" ]; then
@@ -135,7 +138,7 @@ if [ ! -f "$tarball" ] || [ "$(file_sha "$tarball")" != "$MRUBY_SHA256" ]; then
 fi
 
 if [ -n "${FORCE:-}" ]; then
-  rm -rf "$src"
+  rm -rf "$src" "$cache"/mruby-build-*
 fi
 if [ ! -d "$src" ]; then
   echo "build-wasm: unpacking mruby $MRUBY_VERSION"
@@ -172,6 +175,7 @@ jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 (
   cd "$src"
   MRUBY_CONFIG="$root/tools/mruby_build_config.rb" \
+    MRUBY_BUILD_DIR="$build_dir" \
     DEWASM_MRUBY_CC="$cc_wrapper" \
     DEWASM_MRUBY_LD="$cc_wrapper" \
     DEWASM_MRUBY_AR="$ar_wrapper" \
@@ -183,14 +187,14 @@ jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 echo "build-wasm: shim.o"
 zig cc -target wasm32-wasi "${OPT_FLAGS[@]}" "${EH_FLAGS[@]}" \
   "${SHIM_DEFINES[@]/#/-D}" \
-  -I "$src/include" -I "$src/build/wasm32-wasi/include" \
+  -I "$src/include" -I "$build_dir/wasm32-wasi/include" \
   -c -o "$cache/shim.o" tools/shim/shim.c
 
 # No EH flag reaches the link (the zig 0.16 trap above), and --strip-debug is what keeps the module from carrying full DWARF.
 echo "build-wasm: linking $out"
 zig cc -target wasm32-wasi -mexec-model=reactor \
   -Wl,--strip-debug -Wl,-z,stack-size="$STACK_SIZE" \
-  -o "$out" "$cache/shim.o" "$cache/rt.o" "$src/build/wasm32-wasi/lib/libmruby.a"
+  -o "$out" "$cache/shim.o" "$cache/rt.o" "$build_dir/wasm32-wasi/lib/libmruby.a"
 
 if [ "$WASM_OPT" != 0 ]; then
   require_tool wasm-opt "install binaryen 132 or newer (e.g. brew install binaryen)"
