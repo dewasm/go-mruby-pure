@@ -4,7 +4,7 @@
 
 The [mruby](https://mruby.org) interpreter is compiled to WebAssembly (WASI) and translated to **pure Go** source by [`dewasm`](https://github.com/dewasm/dewasm), so this library needs *no C toolchain*, no *shared libraries*, and *no cgo*.
 `go get` is the whole installation, cross compilation keeps working, and the interpreter runs inside your process as ordinary Go code.
-It is *unrelated* to [mitchellh/go-mruby](https://github.com/mitchellh/go-mruby), the archived cgo bindings, beyond the name.
+It shares no code with [mitchellh/go-mruby](https://github.com/mitchellh/go-mruby), the archived cgo bindings, but covers its ground; the table under "Coming from mitchellh/go-mruby" maps the two.
 
 ```go
 vm, err := mruby.New()
@@ -20,7 +20,7 @@ fmt.Println(v) // hello, world
   `*Value` carries immediates (nil, booleans, integers, floats, strings, symbols) by value and everything else as a garbage-collected handle; `GoValue` expands arrays and hashes into `[]any` and `map[any]any` recursively, with cycle detection.
 - **Go functions become Ruby methods.**
   Reflection over an ordinary Go signature (`func(string) (string, error)` and the like; an `error` return raises in Ruby), or an explicit form receiving self, arguments, and the block.
-  Blocks are first class: a host function can yield, and Ruby Procs are callable from Go.
+  Blocks are first class: a host function can yield, Ruby Procs are callable from Go, and `CallWithBlock` passes a Proc as a method's block.
 
   ```go
   vm.Define("shout", func(s string) string { return strings.ToUpper(s) + "!" })
@@ -28,11 +28,33 @@ fmt.Println(v) // hello, world
   ```
 
 - **Ruby exceptions are Go errors.**
-  Every crossing path surfaces them as `*mruby.RubyError` (class, message, backtrace) through `errors.As`; `mruby.Raise` lets a host function raise a chosen class.
-- **Classes.**
-  `DefineClass` and `DefineMethod` build Ruby classes whose methods are Go functions; `Class.New` instantiates them.
+  Every crossing path surfaces them as `*mruby.RubyError` (class, message, backtrace) through `errors.As`; `mruby.Raise` lets a host function raise a chosen class, and `WithFilename` names an `Eval`'s source so backtraces point at your file.
+- **Classes, modules, constants.**
+  `DefineClass` and `DefineModule` build namespaces whose methods are Go functions (`DefineMethod`, `DefineClassMethod`, `DefineModuleFunction`), nested through the same calls on a `Class` or `Module`; `DefineConst` sets constants and `Class.New` instantiates.
+- **The interpreter's state is reachable without evaluating source.**
+  `Constant` and `ConstDefined` resolve `A::B` paths; `GlobalVar`/`SetGlobalVar` and `Value.InstanceVar`/`SetInstanceVar` read and write variables.
+- **`Decode` fills Go structs.**
+  A Ruby Hash, or any object with reader methods, decodes into a struct field by field, guided by the `mruby` tag, with `,squash` for embedded structs.
 - **Isolated, capturable, concurrent.**
   Each `VM` is an independent interpreter; `WithStdout`/`WithStderr` route its output to any `io.Writer`; VM methods are safe for concurrent use (calls are serialized internally).
+
+## Coming from mitchellh/go-mruby
+
+| mitchellh/go-mruby | here |
+| --- | --- |
+| `NewMrb()`, `Close()` | `New()`; there is nothing to close, the VM is garbage collected |
+| `LoadString`, `Parser` + `CompileContext` | `Eval(src)`, `Eval(src, WithFilename("app.rb"))` |
+| `Func` + `GetArgs` + `ArgSpec` | any Go function via reflection, or `func(*mruby.Call) (any, error)` |
+| `DefineClass`, `DefineModule`, `DefineClassUnder`, `DefineModuleUnder` | `DefineClass`/`DefineModule` on `VM`, `Class`, and `Module` |
+| `DefineClassMethod`, `DefineConst` | the same names, on `Class` and `Module` |
+| `GetGlobalVariable`, `SetGlobalVariable` | `GlobalVar`, `SetGlobalVar` |
+| `GetInstanceVariable`, `SetInstanceVariable` | `Value.InstanceVar`, `Value.SetInstanceVar` |
+| `MrbValue.Call`, `CallBlock` | `Value.Call`, `Value.CallWithBlock` |
+| `Decode` | `Decode`, the same `mruby` tag with `,squash` |
+| `Exception` | `*RubyError`, matched with `errors.As` |
+| `Yield` | `Call.Block().Call("call", args...)` |
+| `ArenaSave`, `ArenaRestore`, `GCProtect`, `IsDead` | not needed: handles are garbage collected, `Value.Release` and `VM.FullGC` free eagerly |
+| `Fixnum()`, `Float()`, `String()` (unchecked) | `AsInt`, `AsFloat`, `AsString`, `AsSymbol`, `AsBool` (type checked), `GoValue` |
 
 ## How it works
 
