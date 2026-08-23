@@ -7,6 +7,7 @@ package mrubyvm
 import (
 	"fmt"
 	"io"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 )
@@ -118,6 +119,7 @@ type Instance struct {
 	stdout   io.Writer
 	stderr   io.Writer
 	hostCall func(*Instance) int32
+	hook     func(*Instance) int32
 
 	releaseMu sync.Mutex
 	release   []int32
@@ -138,7 +140,7 @@ func NewInstance(stdout, stderr io.Writer, hostCall func(*Instance) int32) (_ *I
 	defer in.guard(&err)
 
 	imports := Imports{
-		"host":                   map[string]any{"call": in.hostEntry},
+		"host":                   map[string]any{"call": in.hostEntry, "hook": in.hookEntry},
 		"wasi_snapshot_preview1": map[string]any{"fd_write": in.fdWrite},
 	}
 	in.mod = NewMrubyvm(imports, nil, nil, nil)
@@ -161,6 +163,8 @@ type dmFuncs struct {
 	vmInit func() uint32
 	alloc  func(uint32) uint32
 	free   func(uint32)
+
+	hookSet func(uint64) uint32
 
 	eval      func(uint32, uint32) uint32
 	evalFile  func(uint32, uint32, uint32, uint32) uint32
@@ -262,6 +266,7 @@ func bindFuncs(m *Mrubyvm) (dmFuncs, error) {
 	bindTo(m, "dm_init", &f.vmInit, &err)
 	bindTo(m, "dm_alloc", &f.alloc, &err)
 	bindTo(m, "dm_free", &f.free, &err)
+	bindTo(m, "dm_hook_set", &f.hookSet, &err)
 	bindTo(m, "dm_eval", &f.eval, &err)
 	bindTo(m, "dm_eval_file", &f.evalFile, &err)
 	bindTo(m, "dm_call", &f.call, &err)
@@ -987,6 +992,43 @@ func (in *Instance) hostEntry(fnID uint32) (rc uint32) {
 		return 1
 	}
 	return uint32(in.hostCall(in))
+}
+
+// SetHook installs hook as the interpreter's instruction hook, called every `every` VM instructions while Ruby code runs; a nil hook or an interval of zero or less uninstalls it.
+// The callback returns 0 to let execution carry on and 1 to raise what it passed to HostRaise at that instruction boundary.
+func (in *Instance) SetHook(every int64, hook func(*Instance) int32) (err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	if hook == nil || every <= 0 {
+		in.hook = nil
+		return in.status(in.fn.hookSet(0))
+	}
+	in.hook = hook
+	return in.status(in.fn.hookSet(uint64(every)))
+}
+
+// hookEntry is the guest's `host.hook` import: it runs the embedder's callback from mruby's code fetch hook.
+// The hook protocol carries no arguments and no return value, only the rc and whatever HostRaise recorded, so none of the frames a host callback needs are pushed for it.
+func (in *Instance) hookEntry() (rc uint32) {
+	in.hostDepth.Add(1)
+	defer in.hostDepth.Add(-1)
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if guestError(r) != nil {
+			panic(r)
+		}
+		in.HostRaise("RuntimeError", fmt.Sprintf("%v\n\n%s", r, debug.Stack()))
+		rc = 1
+	}()
+
+	if in.hook == nil {
+		return 0
+	}
+	return uint32(in.hook(in))
 }
 
 // HostFnID is the id DefineMethod registered for the method now calling back, valid only inside a host callback.

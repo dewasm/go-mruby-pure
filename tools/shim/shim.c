@@ -41,6 +41,7 @@ _Static_assert(sizeof(mrb_float) == 8, "mrb_float must be double: do not build w
 #define DM_EXPORT(name) __attribute__((export_name(#name), used)) name
 
 __attribute__((import_module("host"), import_name("call"))) extern int32_t host_call(int32_t fn_id);
+__attribute__((import_module("host"), import_name("hook"))) extern int32_t host_hook(void);
 
 enum {
   DM_OK = 0,       /* the call completed; the result capture holds its value */
@@ -441,6 +442,53 @@ dm_trampoline(mrb_state *m, mrb_value self)
   mrb_gc_arena_restore(m, ai);
   if (!mrb_immediate_p(ret)) mrb_gc_protect(m, ret);
   return ret;
+}
+
+/* --- the instruction hook ------------------------------------------------ */
+
+static int64_t hook_every;
+static int64_t hook_countdown;
+
+/*
+** mruby's code fetch hook, which the interpreter calls with the instruction it is about to run.
+** That is an instruction fetch boundary, the same safe point at which the opcodes themselves raise, so mrb_exc_raise here unwinds through the catch handlers of the code being interrupted; the raise path is the trampoline's, arena included.
+*/
+static void
+dm_code_fetch_hook(mrb_state *m, const struct mrb_irep *irep, const mrb_code *pc, mrb_value *regs)
+{
+  (void)irep;
+  (void)pc;
+  (void)regs;
+  if (--hook_countdown > 0) return;
+  hook_countdown = hook_every;
+
+  int ai = mrb_gc_arena_save(m);
+  root_set(ROOT_RAISE_CLASS, mrb_nil_value());
+  root_set(ROOT_RAISE_MESSAGE, mrb_nil_value());
+
+  int32_t rc = host_hook();
+  if (rc == 0) {
+    mrb_gc_arena_restore(m, ai);
+    return;
+  }
+
+  struct RClass *c = lookup_class(root_get(ROOT_RAISE_CLASS));
+  if (!c) c = mrb_class_get(m, "RuntimeError");
+  mrb_value message = root_get(ROOT_RAISE_MESSAGE);
+  mrb_value msg = mrb_string_p(message) ? message : mrb_str_new_lit(m, "host error");
+  mrb_exc_raise(m, mrb_exc_new_str(m, c, msg));
+}
+
+/* Uninstalling leaves mruby's own null check per instruction, which is all MRB_USE_DEBUG_HOOK costs when no hook is armed. */
+int32_t
+DM_EXPORT(dm_hook_set)(int64_t every)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  internal_error = NULL;
+  hook_every = every > 0 ? every : 0;
+  hook_countdown = hook_every;
+  mrb->code_fetch_hook = hook_every > 0 ? dm_code_fetch_hook : NULL;
+  return DM_OK;
 }
 
 /* --- lifecycle ----------------------------------------------------------- */

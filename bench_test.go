@@ -69,9 +69,25 @@ end`); err != nil {
 }
 
 func BenchmarkFib20(b *testing.B) {
+	benchFib20(b, nil)
+}
+
+// The same work with an instruction hook armed: against BenchmarkFib20 this is what a hook costs at that interval.
+func BenchmarkFib20Hooked(b *testing.B) {
+	benchFib20(b, func(vm *VM) {
+		if err := vm.SetHook(10_000, func() error { return nil }); err != nil {
+			b.Fatal(err)
+		}
+	})
+}
+
+func benchFib20(b *testing.B, arm func(*VM)) {
 	vm := newVM(b, WithStdout(nil), WithStderr(nil))
 	if _, err := vm.Eval("def fib(n); n < 2 ? n : fib(n - 1) + fib(n - 2); end"); err != nil {
 		b.Fatal(err)
+	}
+	if arm != nil {
+		arm(vm)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

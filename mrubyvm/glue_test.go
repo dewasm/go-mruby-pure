@@ -1438,3 +1438,78 @@ func TestHeldRefsSurviveGC(t *testing.T) {
 		t.Errorf("the held Hash lost its key after a GC: %+v", key)
 	}
 }
+
+func TestHookFiresAndDisarms(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	calls := 0
+	if err := in.SetHook(100, func(*Instance) int32 {
+		calls++
+		return 0
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "n = 0; 500.times { |i| n += i }; n", false); v.Int != 124750 {
+		t.Fatalf("the computation under a hook gave %+v", v)
+	}
+	if calls == 0 {
+		t.Fatal("the hook never ran during a computation of thousands of instructions")
+	}
+
+	fired := calls
+	if err := in.SetHook(0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "n = 0; 500.times { |i| n += i }; n", false); v.Int != 124750 {
+		t.Fatalf("the computation after disarming gave %+v", v)
+	}
+	if calls != fired {
+		t.Errorf("the hook ran %d more times after SetHook(0, nil)", calls-fired)
+	}
+}
+
+func TestHookRaiseReachesTheHost(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	if err := in.SetHook(50, func(vm *Instance) int32 {
+		vm.HostRaise("ArgumentError", "enough")
+		return 1
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := in.Eval("loop { }", false)
+
+	var re *RubyError
+	if !errors.As(err, &re) {
+		t.Fatalf("the interrupted Eval gave %v (%T), want *RubyError", err, err)
+	}
+	if re.Class != "ArgumentError" || re.Message != "enough" {
+		t.Errorf("the hook raised %s: %s", re.Class, re.Message)
+	}
+
+	// The VM survives the raise the hook made.
+	if err := in.SetHook(0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "1 + 1", false); v.Int != 2 {
+		t.Errorf("after an interruption: 1 + 1 = %+v", v)
+	}
+}
+
+func TestHookWithALargeIntervalDoesNotFire(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	calls := 0
+	if err := in.SetHook(1<<40, func(*Instance) int32 {
+		calls++
+		return 0
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "1 + 1", false); v.Int != 2 {
+		t.Fatalf("1 + 1 = %+v", v)
+	}
+	if calls != 0 {
+		t.Errorf("the hook ran %d times on an evaluation far shorter than its interval", calls)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/dewasm/go-mruby-pure"
 )
@@ -116,6 +117,32 @@ func ExampleVM_DefineModule() {
 	// Output:
 	// [HELLO!]
 	// !
+}
+
+func ExampleVM_SetHook() {
+	vm, err := mruby.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// An Exception, not a StandardError: a bare rescue in the script must not swallow the deadline.
+	if _, err := vm.Eval("class Deadline < Exception; end"); err != nil {
+		log.Fatal(err)
+	}
+
+	deadline := time.Now().Add(50 * time.Millisecond)
+	err = vm.SetHook(1000, func() error {
+		if time.Now().Before(deadline) {
+			return nil
+		}
+		return mruby.Raise("Deadline", "the script ran out of time")
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = vm.Eval("loop { }")
+	fmt.Println(err)
+	// Output: Deadline: the script ran out of time
 }
 
 func ExampleValue_CallWithBlock() {

@@ -37,6 +37,8 @@ fmt.Println(v) // hello, world
   A Ruby Hash, or any object with reader methods, decodes into a struct field by field, guided by the `mruby` tag, with `,squash` for embedded structs.
 - **Isolated, capturable, concurrent.**
   Each `VM` is an independent interpreter; `WithStdout`/`WithStderr` route its output to any `io.Writer`; VM methods are safe for concurrent use (calls are serialized internally).
+- **A runaway script is interruptible.**
+  `SetHook` runs a Go callback every N VM instructions; an error it returns raises at an instruction boundary, so an endless `loop { }` comes back as a Ruby exception, `ensure` blocks run, and the VM survives.
 
 ## Coming from mitchellh/go-mruby
 
@@ -74,10 +76,11 @@ Measured on Apple M1 Pro (`go test -bench .`):
 
 | Benchmark | Time |
 | --- | --- |
-| `New` (fresh interpreter) | 0.47 ms |
+| `New` (fresh interpreter) | 0.48 ms |
 | `Eval` of an arithmetic expression | 2.7 µs |
 | Ruby calling a Go-defined method | 1.7 µs |
-| `fib(20)` in Ruby | 9.4 ms |
+| `fib(20)` in Ruby | 9.8 ms |
+| `fib(20)` with the hook armed (`SetHook`, any interval) | 24.5 ms |
 
 Integers within ±2³⁰ and all value moves take the interpreter's fast path; a wider Integer is an arbitrary-precision object inside Ruby, and carrying one across the Go boundary costs about a microsecond extra.
 
@@ -85,7 +88,8 @@ Integers within ±2³⁰ and all value moves take the interpreter's fast path; a
 
 - The embedded mruby excludes the gems that need an operating system (`mruby-io`, `mruby-dir`, `mruby-socket`); the interpreter computes, and your Go code does the I/O through host functions.
 - While a host function is running, only the goroutine inside it may use that VM.
-- `Eval` is not interruptible.
+- `SetHook` interrupts Ruby-level execution only: a long-running C routine inside the interpreter (a huge arbitrary-precision multiplication, for example) and a blocking Go host function run to completion.
+- While the hook is armed the interpreter runs at less than half speed, whatever the interval, so arm it only around the execution that needs a budget.
 
 ## License
 

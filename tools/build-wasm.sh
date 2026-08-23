@@ -14,6 +14,7 @@
 # Under a profile whose mrb_int is 32-bit it also carries the upper half of the ABI's i64 Integer range, so it is required there rather than merely useful.
 #
 # Re-running is a no-op while tools/cache/mruby_shim.stamp matches the inputs; FORCE=1 rebuilds from a clean tree, which is what the byte-identical rebuild is verified with.
+# A change to MRUBY_DEFINES needs FORCE=1: mruby's rake build tracks source timestamps and not compiler flags, so an incremental run keeps objects compiled with the old defines while the shim is compiled with the new ones, and the two then disagree about the layout of mrb_state.
 
 set -euo pipefail
 
@@ -63,7 +64,11 @@ case "$PROFILE" in
     exit 1
     ;;
 esac
-MRUBY_DEFINES=("${BOXING_DEFINES[@]}" MRB_UTF8_STRING)
+#
+# MRB_USE_DEBUG_HOOK is what gives the shim an interruption point: it compiles mruby's code fetch hook into the interpreter loop, which is where tools/shim/shim.c raises a Ruby exception on behalf of a Go callback.
+# It changes the mrb_state layout, and SHIM_DEFINES inherits MRUBY_DEFINES, so libmruby and the shim stay consistent.
+# Its idle cost, with no hook armed, is one null check per VM instruction: 9.96ms on Fib20 against the 9.43ms of the table below, 5.6% slower.
+MRUBY_DEFINES=("${BOXING_DEFINES[@]}" MRB_UTF8_STRING MRB_USE_DEBUG_HOOK)
 
 # mruby-bigint defines MRB_USE_BIGINT for libmruby through its own mrbgem.rake; the shim is compiled outside that build and needs it to see the bigint entry points.
 SHIM_DEFINES=("${MRUBY_DEFINES[@]}" MRB_USE_BIGINT)
