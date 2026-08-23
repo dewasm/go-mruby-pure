@@ -392,6 +392,111 @@ func TestEvalKeepsLocalVariables(t *testing.T) {
 	}
 }
 
+func TestEvalWithFilename(t *testing.T) {
+	vm := newVM(t)
+
+	v, err := vm.Eval("__FILE__", WithFilename("app.rb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := v.AsString(); got != "app.rb" {
+		t.Errorf("__FILE__ = %q, want app.rb", got)
+	}
+
+	_, err = vm.Eval("def app_boom; raise 'gave way'; end; app_boom", WithFilename("app.rb"))
+	var re *RubyError
+	if !errors.As(err, &re) {
+		t.Fatalf("the raise = %v, want a *RubyError", err)
+	}
+	if len(re.Backtrace) == 0 || !strings.HasPrefix(re.Backtrace[0], "app.rb:") {
+		t.Errorf("backtrace = %q, want it to name app.rb", re.Backtrace)
+	}
+
+	// The name is this one evaluation's; the next one is nameless again.
+	if got := mustEval(t, vm, "__FILE__").String(); got != "(eval)" {
+		t.Errorf("__FILE__ after a named evaluation = %q", got)
+	}
+	_, err = vm.Eval("raise 'again'")
+	if !errors.As(err, &re) {
+		t.Fatalf("the second raise = %v, want a *RubyError", err)
+	}
+	if len(re.Backtrace) == 0 || !strings.HasPrefix(re.Backtrace[0], "(eval):") {
+		t.Errorf("backtrace = %q, want it to name (eval)", re.Backtrace)
+	}
+}
+
+func TestCallWithBlock(t *testing.T) {
+	vm := newVM(t)
+	mustEval(t, vm, "def collect; (0...3).map { |i| yield i }; end")
+	square := mustEval(t, vm, "->(i) { i * i }")
+
+	// Through the VM, on the top-level object.
+	v, err := vm.CallWithBlock(nil, "collect", square)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Inspect(); got != "[0, 1, 4]" {
+		t.Errorf("collect = %s", got)
+	}
+
+	// Through the value, on a receiver of its own.
+	list := mustEval(t, vm, "[1, 2, 3]")
+	doubled, err := list.CallWithBlock("map", mustEval(t, vm, "->(n) { n * 2 }"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doubled.Inspect(); got != "[2, 4, 6]" {
+		t.Errorf("map = %s", got)
+	}
+
+	// A method that takes arguments takes them past the block.
+	sum, err := list.CallWithBlock("inject", mustEval(t, vm, "->(acc, n) { acc + n }"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sum.String(); got != "16" {
+		t.Errorf("inject = %s, want 16", got)
+	}
+
+	// No block is what Call passes.
+	size, err := list.CallWithBlock("size", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := size.String(); got != "3" {
+		t.Errorf("size = %s", got)
+	}
+	if _, err := vm.CallWithBlock(nil, "collect", nil); err == nil {
+		t.Error("a method that yields answered without a block")
+	}
+
+	// A block that is not a Proc is whatever the interpreter makes of it.
+	if _, err := list.CallWithBlock("map", mustEval(t, vm, "42")); err == nil {
+		t.Error("an Integer passed as a block was accepted")
+	}
+	if got := mustEval(t, vm, "1 + 1").String(); got != "2" {
+		t.Error("the VM did not survive a block that is not one")
+	}
+}
+
+func TestFullGCKeepsHeldValues(t *testing.T) {
+	vm := newVM(t)
+
+	live := mustEval(t, vm, "[1, 2, 3]")
+	for i := 0; i < 100; i++ {
+		mustEval(t, vm, "'garbage' * 10").Release()
+	}
+	if err := vm.FullGC(); err != nil {
+		t.Fatal(err)
+	}
+	if got := live.Inspect(); got != "[1, 2, 3]" {
+		t.Errorf("the held value reads as %s after a collection", got)
+	}
+	if got := mustEval(t, vm, "1 + 1").String(); got != "2" {
+		t.Error("the VM did not survive a collection")
+	}
+}
+
 func TestStdoutAndStderrCapture(t *testing.T) {
 	var out, errOut bytes.Buffer
 	vm := newVM(t, WithStdout(&out), WithStderr(&errOut))

@@ -78,6 +78,67 @@ func ExampleVM_DefineClass() {
 	// hello, Go
 }
 
+func ExampleVM_DefineModule() {
+	vm, err := mruby.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	text, err := vm.DefineModule("Text")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := text.DefineModuleFunction("shout", strings.ToUpper); err != nil {
+		log.Fatal(err)
+	}
+	if err := text.DefineConst("MARK", "!"); err != nil {
+		log.Fatal(err)
+	}
+
+	banner, err := text.DefineClass("Banner", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := banner.DefineClassMethod("of", func(s string) string { return "[" + s + "]" }); err != nil {
+		log.Fatal(err)
+	}
+
+	fromRuby, err := vm.Eval(`Text::Banner.of(Text.shout("hello") + Text::MARK)`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(fromRuby)
+
+	mark, err := vm.Constant("Text::MARK")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(mark)
+	// Output:
+	// [HELLO!]
+	// !
+}
+
+func ExampleValue_CallWithBlock() {
+	vm, err := mruby.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	list, err := vm.Eval("[1, 2, 3]")
+	if err != nil {
+		log.Fatal(err)
+	}
+	block, err := vm.Eval("->(n) { n * n }")
+	if err != nil {
+		log.Fatal(err)
+	}
+	squares, err := list.CallWithBlock("map", block)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(squares.Inspect())
+	// Output: [1, 4, 9]
+}
+
 func ExampleValue_GoValue() {
 	vm, err := mruby.New()
 	if err != nil {

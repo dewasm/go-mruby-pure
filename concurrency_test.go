@@ -131,6 +131,81 @@ func TestHostFunctionsFromManyGoroutines(t *testing.T) {
 	}
 }
 
+// The constant walk and the setters take several guest calls in a row, on one argument scratch, so what they leave there must not reach another goroutine's call.
+func TestConstantsAndVariablesFromManyGoroutines(t *testing.T) {
+	vm := newVM(t)
+	constantTree(t, vm)
+	box := mustDefineClass(t, vm, "Box", nil)
+	square := mustEval(t, vm, "->(n) { n * n }")
+
+	const goroutines, rounds = 8, 20
+	errs := make(chan error, goroutines*rounds)
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			name := fmt.Sprintf("$g%d", g)
+			for i := 0; i < rounds; i++ {
+				if err := vm.SetGlobalVar(name, []any{g, i}); err != nil {
+					errs <- err
+					return
+				}
+				held, err := vm.GlobalVar(name)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if got := held.Inspect(); got != fmt.Sprintf("[%d, %d]", g, i) {
+					errs <- fmt.Errorf("%s = %s", name, got)
+					return
+				}
+				deep, err := vm.Constant("Outer::Inner::DEEP")
+				if err != nil {
+					errs <- err
+					return
+				}
+				if n, _ := deep.AsInt(); n != 3 {
+					errs <- fmt.Errorf("Outer::Inner::DEEP = %d", n)
+					return
+				}
+				instance, err := box.New()
+				if err != nil {
+					errs <- err
+					return
+				}
+				if err := instance.SetInstanceVar("@n", i); err != nil {
+					errs <- err
+					return
+				}
+				n, err := instance.InstanceVar("@n")
+				if err != nil {
+					errs <- err
+					return
+				}
+				if got, _ := n.AsInt(); got != int64(i) {
+					errs <- fmt.Errorf("@n = %d, want %d", got, i)
+					return
+				}
+				v, err := vm.CallWithBlock(nil, "identity", square, i)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if got, _ := v.AsInt(); got != int64(i) {
+					errs <- fmt.Errorf("identity with a block = %d, want %d", got, i)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
 func TestManyVMsFromManyGoroutines(t *testing.T) {
 	const goroutines = 6
 	errs := make(chan error, goroutines)

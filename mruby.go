@@ -78,16 +78,39 @@ func New(opts ...Option) (*VM, error) {
 	return vm, nil
 }
 
+// EvalOption configures one evaluation.
+type EvalOption func(*evalOptions)
+
+type evalOptions struct {
+	filename string
+}
+
+// WithFilename compiles the source under name, which is what `__FILE__` and a backtrace of it report; an evaluation without one reports `(eval)`.
+func WithFilename(name string) EvalOption {
+	return func(o *evalOptions) { o.filename = name }
+}
+
 // Eval compiles and runs src.
 // One VM keeps one compiler context, so a local variable defined by one Eval is visible to the next.
-func (vm *VM) Eval(src string) (*Value, error) {
+func (vm *VM) Eval(src string, opts ...EvalOption) (*Value, error) {
+	var o evalOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	defer vm.enter()()
 
-	raw, err := vm.in.Eval(src, false)
+	raw, err := vm.eval(src, o.filename)
 	if err != nil {
 		return nil, vm.wrap(err)
 	}
 	return vm.capture(raw)
+}
+
+func (vm *VM) eval(src, filename string) (mrubyvm.Value, error) {
+	if filename == "" {
+		return vm.in.Eval(src, false)
+	}
+	return vm.in.EvalFile(src, filename, false)
 }
 
 // Call invokes the method name on recv, or on the top-level object when recv is nil.
@@ -95,6 +118,22 @@ func (vm *VM) Eval(src string) (*Value, error) {
 func (vm *VM) Call(recv *Value, name string, args ...any) (*Value, error) {
 	defer vm.enter()()
 	return vm.call(recv, name, args)
+}
+
+// CallWithBlock is Call with block passed as the method's block, which is what a Ruby yield reaches; a nil block passes none.
+func (vm *VM) CallWithBlock(recv *Value, name string, block *Value, args ...any) (*Value, error) {
+	defer vm.enter()()
+	return vm.callBlock(recv, name, block, args)
+}
+
+// FullGC runs a full garbage collection, which every Value the VM handed out survives.
+func (vm *VM) FullGC() error {
+	defer vm.enter()()
+
+	if err := vm.in.FullGC(); err != nil {
+		return vm.wrap(err)
+	}
+	return nil
 }
 
 // enter serializes calls into the interpreter and returns the matching leave.
@@ -108,13 +147,22 @@ func (vm *VM) enter() func() {
 }
 
 func (vm *VM) call(recv *Value, name string, args []any) (*Value, error) {
+	return vm.callBlock(recv, name, nil, args)
+}
+
+func (vm *VM) callBlock(recv *Value, name string, block *Value, args []any) (*Value, error) {
 	b := builder{vm: vm}
 	defer b.done()
 
-	var recvRef int32
+	var recvRef, blockRef int32
+	var err error
 	if recv != nil {
-		var err error
 		if recvRef, err = b.receiver(recv); err != nil {
+			return nil, err
+		}
+	}
+	if block != nil {
+		if blockRef, err = b.receiver(block); err != nil {
 			return nil, err
 		}
 	}
@@ -124,11 +172,19 @@ func (vm *VM) call(recv *Value, name string, args []any) (*Value, error) {
 	if err := b.flush(); err != nil {
 		return nil, err
 	}
-	raw, err := vm.in.Call(recvRef, name, false)
+	raw, err := vm.send(recvRef, name, blockRef)
 	if err != nil {
 		return nil, vm.wrap(err)
 	}
 	return vm.capture(raw)
+}
+
+// send is the call itself: a block ref of 0 is no block, which is the plain entry point.
+func (vm *VM) send(recvRef int32, name string, blockRef int32) (mrubyvm.Value, error) {
+	if blockRef == 0 {
+		return vm.in.Call(recvRef, name, false)
+	}
+	return vm.in.CallBlock(recvRef, name, blockRef, false)
 }
 
 // capture turns one readout of the interpreter's last result into a Value: an immediate carries its data, everything else a reference.

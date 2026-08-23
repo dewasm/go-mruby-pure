@@ -26,59 +26,6 @@ func (vm *VM) Define(name string, fn any) error {
 	return nil
 }
 
-// DefineClass defines name as a class under Object, deriving from super, or from Object when super is nil.
-func (vm *VM) DefineClass(name string, super *Class) (*Class, error) {
-	defer vm.enter()()
-
-	var superRef int32
-	if super != nil {
-		if super.vm != vm {
-			return nil, errors.New("mruby: the superclass belongs to another VM")
-		}
-		superRef = super.value.ref
-	}
-	ref, err := vm.in.DefineClass(name, superRef)
-	if err != nil {
-		return nil, vm.wrap(err)
-	}
-	if ref == 0 {
-		return nil, fmt.Errorf("mruby: the interpreter would not hold on to class %s", name)
-	}
-	return &Class{vm: vm, name: name, value: vm.handle(mrubyvm.KindOther, ref)}, nil
-}
-
-// Class is a Ruby class defined from Go.
-type Class struct {
-	vm    *VM
-	name  string
-	value *Value
-}
-
-// Value is the class object itself, for sending it a message or passing it on.
-func (c *Class) Value() *Value {
-	return c.value
-}
-
-// DefineMethod defines name as an instance method of the class, taking the same fn as VM.Define.
-func (c *Class) DefineMethod(name string, fn any) error {
-	defer c.vm.enter()()
-
-	id, err := c.vm.register(c.name+"#"+name, fn)
-	if err != nil {
-		return err
-	}
-	if err := c.vm.in.DefineMethod(c.value.ref, name, id); err != nil {
-		return c.vm.wrap(err)
-	}
-	return nil
-}
-
-// New makes an instance, passing the arguments on to initialize.
-func (c *Class) New(args ...any) (*Value, error) {
-	defer c.vm.enter()()
-	return c.vm.call(c.value, "new", args)
-}
-
 func (vm *VM) register(name string, fn any) (int32, error) {
 	h, err := makeHostFunc(name, fn)
 	if err != nil {

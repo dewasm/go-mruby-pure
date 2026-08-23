@@ -254,6 +254,15 @@ func (v *Value) Call(name string, args ...any) (*Value, error) {
 	return v.vm.call(v, name, args)
 }
 
+// CallWithBlock is Call with block passed as the method's block, which is what a Ruby yield reaches; a nil block passes none.
+func (v *Value) CallWithBlock(name string, block *Value, args ...any) (*Value, error) {
+	if v == nil {
+		return nil, errors.New("mruby: CallWithBlock on a value that is not there")
+	}
+	defer v.vm.enter()()
+	return v.vm.callBlock(v, name, block, args)
+}
+
 // Release gives the interpreter its reference back without waiting for the collector.
 // The value is unusable afterwards. Releasing twice, or releasing an immediate, does nothing.
 func (v *Value) Release() {
