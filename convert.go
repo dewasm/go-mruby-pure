@@ -5,7 +5,7 @@ import (
 	"math"
 	"reflect"
 
-	"github.com/dewasm/go-mruby/mrubyvm"
+	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
 
 // The Go types that cross the boundary, in either direction.

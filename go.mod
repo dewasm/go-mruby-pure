@@ -1,3 +1,3 @@
-module github.com/dewasm/go-mruby
+module github.com/dewasm/go-mruby-pure
 
 go 1.24

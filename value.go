@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/dewasm/go-mruby/mrubyvm"
+	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
 
 // Type is what Ruby class a Value belongs to, as far as this package distinguishes.

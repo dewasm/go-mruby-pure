@@ -1,4 +1,4 @@
-# go-mruby
+# go-mruby-pure
 
 **mruby** for **Go** *without cgo*.
 

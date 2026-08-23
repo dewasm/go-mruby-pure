@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/dewasm/go-mruby"
+	"github.com/dewasm/go-mruby-pure"
 )
 
 func Example() {

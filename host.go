@@ -7,7 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/dewasm/go-mruby/mrubyvm"
+	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
 
 // Define defines name as a Ruby method callable from anywhere, an instance method of Kernel.

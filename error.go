@@ -3,7 +3,7 @@ package mruby
 import (
 	"fmt"
 
-	"github.com/dewasm/go-mruby/mrubyvm"
+	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
 
 // RubyError is a Ruby exception that reached Go.

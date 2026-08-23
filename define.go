@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/dewasm/go-mruby/mrubyvm"
+	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
 
 // DefineClass defines name as a class under Object, deriving from super, or from Object when super is nil.
