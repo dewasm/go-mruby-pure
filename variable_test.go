@@ -175,13 +175,20 @@ func TestInstanceVarRoundTrip(t *testing.T) {
 		t.Errorf("@never_set = %s, want nil", unset.Inspect())
 	}
 
-	// The name crosses as it is, so the interpreter is what refuses one without a `@`.
-	var re *RubyError
-	if _, err := instance.InstanceVar("held"); !errors.As(err, &re) || re.Class != "NameError" {
-		t.Errorf("InstanceVar(\"held\") = %v, want a NameError", err)
+	// The name crosses as it is: one without `@` names an instance variable Ruby syntax cannot express, so it is reachable from Go and not from Ruby.
+	if err := instance.SetInstanceVar("held", 1); err != nil {
+		t.Fatal(err)
 	}
-	if err := instance.SetInstanceVar("held", 1); !errors.As(err, &re) || re.Class != "NameError" {
-		t.Errorf("SetInstanceVar(\"held\") = %v, want a NameError", err)
+	hidden, err := instance.InstanceVar("held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hidden.String(); got != "1" {
+		t.Errorf("InstanceVar(\"held\") = %s, want 1", got)
+	}
+	var re *RubyError
+	if _, err := instance.Call("instance_variable_get", Symbol("held")); !errors.As(err, &re) || re.Class != "NameError" {
+		t.Errorf("instance_variable_get(:held) = %v, want Ruby's own NameError", err)
 	}
 }
 

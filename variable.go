@@ -143,7 +143,7 @@ func checkGlobalVarName(name string) error {
 	return nil
 }
 
-// InstanceVar reads the instance variable name from the value; the name carries its `@`, and one that was never set reads as Ruby nil.
+// InstanceVar reads the instance variable name from the value; the name crosses verbatim, `@` included, and one that was never set reads as Ruby nil.
 func (v *Value) InstanceVar(name string) (*Value, error) {
 	if v == nil {
 		return nil, errors.New("mruby: InstanceVar on a value that is not there")
@@ -164,7 +164,7 @@ func (v *Value) InstanceVar(name string) (*Value, error) {
 	return v.vm.capture(raw)
 }
 
-// SetInstanceVar stores value in the instance variable name of the value; the name carries its `@`, and a value that holds no instance variables raises as Ruby does.
+// SetInstanceVar stores value in the instance variable name of the value; the name crosses verbatim, `@` included, and a value that holds no instance variables raises as Ruby does.
 func (v *Value) SetInstanceVar(name string, value any) error {
 	if v == nil {
 		return errors.New("mruby: SetInstanceVar on a value that is not there")

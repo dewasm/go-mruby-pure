@@ -25,8 +25,10 @@
 #include <mruby/string.h>
 #include <mruby/value.h>
 #include <mruby/variable.h>
-/* mruby's own internal header, not the public API: nothing else declares mrb_const_name_p, which is the constant-name check Module#const_set applies, nor the bigint entry points the i64 ABI needs. */
+#ifdef MRB_USE_BIGINT
+/* mrb_bint_* is mruby's own internal header, not the public API: nothing else declares the bigint entry points the i64 ABI needs. */
 #include <mruby/internal.h>
+#endif
 
 /* The ABI passes Float as f64, so mrb_float must be double in every configuration. */
 _Static_assert(sizeof(mrb_float) == 8, "mrb_float must be double: do not build with MRB_USE_FLOAT32");
@@ -1169,16 +1171,7 @@ DM_EXPORT(dm_define_singleton_method)(int32_t target_ref, uint32_t name, uint32_
 
 /* --- constants and variables --------------------------------------------- */
 
-/* mrb_const_set and mrb_const_get take the name as given; Module#const_set is where mruby checks it (src/class.c, check_const_name_sym), and the ABI answers the same NameError. */
-static void
-const_name_check(mrb_state *m, mrb_sym sym)
-{
-  mrb_int len;
-  const char *name = mrb_sym_name_len(m, sym, &len);
-  if (!mrb_const_name_p(m, name, len)) {
-    mrb_name_error(m, sym, "wrong constant name %n", sym);
-  }
-}
+/* Constant and variable names cross verbatim, with none of the checks Module#const_set or Object#instance_variable_set apply: mruby's C API deliberately accepts names Ruby syntax cannot express, which is how an embedder keeps state no Ruby code can reach. */
 
 /* The namespace an entry point addresses by ref, Object when the ref is 0; a ref that is neither a Class nor a Module reaches mruby, which raises TypeError. */
 static mrb_value
@@ -1201,9 +1194,7 @@ static mrb_value
 body_const_get(mrb_state *m, void *ud)
 {
   dm_op *op = (dm_op*)ud;
-  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
-  const_name_check(m, sym);
-  return mrb_const_get(m, op_module(op), sym);
+  return mrb_const_get(m, op_module(op), mrb_intern(m, op->ptr, op->len));
 }
 
 int32_t
@@ -1220,10 +1211,8 @@ static mrb_value
 body_const_set(mrb_state *m, void *ud)
 {
   dm_op *op = (dm_op*)ud;
-  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
-  const_name_check(m, sym);
   mrb_value v = mrb_ary_ref(m, op->args, 0);
-  mrb_const_set(m, op_module(op), sym, v);
+  mrb_const_set(m, op_module(op), mrb_intern(m, op->ptr, op->len), v);
   return v;
 }
 
@@ -1243,9 +1232,7 @@ static mrb_value
 body_const_defined(mrb_state *m, void *ud)
 {
   dm_op *op = (dm_op*)ud;
-  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
-  const_name_check(m, sym);
-  return mrb_bool_value(mrb_const_defined(m, op_module(op), sym));
+  return mrb_bool_value(mrb_const_defined(m, op_module(op), mrb_intern(m, op->ptr, op->len)));
 }
 
 int32_t
@@ -1299,12 +1286,9 @@ body_iv_get(mrb_state *m, void *ud)
   dm_op *op = (dm_op*)ud;
   mrb_value recv;
   reg_get(op->recv_ref, &recv);
-  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
-  mrb_iv_name_sym_check(m, sym);
-  return mrb_iv_get(m, recv, sym);
+  return mrb_iv_get(m, recv, mrb_intern(m, op->ptr, op->len));
 }
 
-/* mrb_iv_get and mrb_iv_set take the name as given, so the `@` check mruby applies in Object#instance_variable_get is made here. */
 int32_t
 DM_EXPORT(dm_iv_get)(int32_t recv_ref, uint32_t name, uint32_t name_len)
 {
@@ -1321,10 +1305,8 @@ body_iv_set(mrb_state *m, void *ud)
   dm_op *op = (dm_op*)ud;
   mrb_value recv;
   reg_get(op->recv_ref, &recv);
-  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
-  mrb_iv_name_sym_check(m, sym);
   mrb_value v = mrb_ary_ref(m, op->args, 0);
-  mrb_iv_set(m, recv, sym, v);
+  mrb_iv_set(m, recv, mrb_intern(m, op->ptr, op->len), v);
   return v;
 }
 

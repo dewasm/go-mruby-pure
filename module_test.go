@@ -193,10 +193,15 @@ func TestDefineConst(t *testing.T) {
 		}
 	}
 
-	// A constant the interpreter refuses is the NameError it raised.
-	err := vm.DefineConst("lower", 1)
-	var re *RubyError
-	if !errors.As(err, &re) || re.Class != "NameError" {
-		t.Errorf("DefineConst(\"lower\") = %v, want a NameError", err)
+	// The name crosses as it is: a lowercase one names a constant Ruby syntax cannot reach, still readable through Constant.
+	if err := vm.DefineConst("lower", 1); err != nil {
+		t.Fatal(err)
+	}
+	lower, err := vm.Constant("lower")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lower.String(); got != "1" {
+		t.Errorf("Constant(\"lower\") = %s, want 1", got)
 	}
 }

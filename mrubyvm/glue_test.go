@@ -1204,22 +1204,21 @@ func TestConstants(t *testing.T) {
 		t.Errorf("ConstGet(Holder, VERSION) = %+v, %v", v, err)
 	}
 
-	// A name that is not a constant name.
+	// The name crosses as it is: a lowercase one names a constant Ruby syntax cannot reach, and the ABI reads it back.
 	if err := in.ArgsReset(); err != nil {
 		t.Fatal(err)
 	}
 	if err := in.PushInt(1); err != nil {
 		t.Fatal(err)
 	}
-	err = in.ConstSet(0, "lowercase")
-	var re *RubyError
-	if !errors.As(err, &re) {
-		t.Fatalf("ConstSet of a lowercase name = %v (%T), want *RubyError", err, err)
+	if err := in.ConstSet(0, "lowercase"); err != nil {
+		t.Fatal(err)
 	}
-	if re.Class != "NameError" {
-		t.Errorf("ConstSet of a lowercase name raised %s, want NameError", re.Class)
+	if v, err := in.ConstGet(0, "lowercase", false); err != nil || v.Int != 1 {
+		t.Errorf("ConstGet(lowercase) = %+v, %v; want 1", v, err)
 	}
 
+	var re *RubyError
 	_, err = in.ConstGet(0, "Uninitialized", false)
 	if !errors.As(err, &re) {
 		t.Fatalf("ConstGet of an uninitialized constant = %v (%T), want *RubyError", err, err)
@@ -1304,24 +1303,28 @@ func TestInstanceVariables(t *testing.T) {
 		t.Errorf("Ruby sees @tag as %+v (%v)", got, err)
 	}
 
-	// mruby validates the name, so a name without `@` is an error rather than a second namespace.
-	_, err = in.IVGet(obj.Ref, "tag", false)
-	var re *RubyError
-	if !errors.As(err, &re) {
-		t.Fatalf("IVGet of a name without @ = %v (%T), want *RubyError", err, err)
-	}
-	if re.Class != "NameError" {
-		t.Errorf("IVGet of a name without @ raised %s, want NameError", re.Class)
-	}
+	// The name crosses as it is: one without `@` names an instance variable Ruby syntax cannot express, so the ABI reads it and Ruby code cannot.
 	if err := in.ArgsReset(); err != nil {
 		t.Fatal(err)
 	}
 	if err := in.PushInt(1); err != nil {
 		t.Fatal(err)
 	}
-	err = in.IVSet(obj.Ref, "tag")
-	if !errors.As(err, &re) || re.Class != "NameError" {
-		t.Errorf("IVSet of a name without @ = %v, want a NameError", err)
+	if err := in.IVSet(obj.Ref, "tag"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := in.IVGet(obj.Ref, "tag", false); err != nil || v.Int != 1 {
+		t.Errorf("IVGet(tag) = %+v, %v; want 1", v, err)
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushSymbol("tag"); err != nil {
+		t.Fatal(err)
+	}
+	var re *RubyError
+	if _, err := in.Call(obj.Ref, "instance_variable_get", false); !errors.As(err, &re) || re.Class != "NameError" {
+		t.Errorf("instance_variable_get(:tag) = %v, want Ruby's own NameError", err)
 	}
 
 	if _, err := in.IVGet(0, "@tag", false); err == nil {
