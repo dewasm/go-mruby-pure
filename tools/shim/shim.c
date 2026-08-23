@@ -25,10 +25,8 @@
 #include <mruby/string.h>
 #include <mruby/value.h>
 #include <mruby/variable.h>
-#ifdef MRB_USE_BIGINT
-/* mrb_bint_* is mruby's own internal header, not the public API: nothing else declares the bigint entry points the i64 ABI needs. */
+/* mruby's own internal header, not the public API: nothing else declares mrb_const_name_p, which is the constant-name check Module#const_set applies, nor the bigint entry points the i64 ABI needs. */
 #include <mruby/internal.h>
-#endif
 
 /* The ABI passes Float as f64, so mrb_float must be double in every configuration. */
 _Static_assert(sizeof(mrb_float) == 8, "mrb_float must be double: do not build with MRB_USE_FLOAT32");
@@ -518,6 +516,27 @@ DM_EXPORT(dm_eval)(uint32_t src, uint32_t len)
   return protected_run(body_eval, &op);
 }
 
+/*
+** The filename is what `__FILE__` and every backtrace line of this one eval read, so it is restored afterwards whatever the run did: the compiler context is shared with dm_eval, whose filename is "(eval)".
+** mrbc_filename needs a NUL-terminated C string and the crossing bytes are not one, so they are copied; it keeps a copy of its own, so the buffer is freed straight away.
+*/
+int32_t
+DM_EXPORT(dm_eval_file)(uint32_t src, uint32_t len, uint32_t filename, uint32_t filename_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  char *name = (char*)mrb_malloc_simple(mrb, (size_t)filename_len + 1);
+  if (!name) return fail_internal("dm_eval_file: out of memory for the filename");
+  memcpy(name, (const void*)(uintptr_t)filename, filename_len);
+  name[filename_len] = '\0';
+  mrbc_filename(mrb, eval_cxt, name);
+  mrb_free(mrb, name);
+
+  dm_op op = {(const char*)(uintptr_t)src, (mrb_int)len, mrb_nil_value(), 0, 0, 0};
+  int32_t rc = protected_run(body_eval, &op);
+  mrbc_filename(mrb, eval_cxt, "(eval)");
+  return rc;
+}
+
 static mrb_bool
 op_receiver(dm_op *op, mrb_value *out)
 {
@@ -979,24 +998,34 @@ DM_EXPORT(dm_hash_get)(int32_t id, int32_t key_ref)
 
 /* --- definitions --------------------------------------------------------- */
 
+enum {
+  DM_DEF_INSTANCE = 0,  /* the target itself */
+  DM_DEF_BOTH = 1,      /* the target and its singleton class, which is what module_function means */
+  DM_DEF_SINGLETON = 2  /* the singleton class alone, which is what a Ruby class method is */
+};
+
 typedef struct dm_def {
   const char *name;
   mrb_int name_len;
   int32_t target_ref;
+  int32_t super_ref;
   int32_t fn_id;
-  mrb_bool module_function;
+  int32_t mode;
 } dm_def;
+
+static struct RClass*
+def_class(int32_t ref, struct RClass *fallback)
+{
+  mrb_value v;
+  if (ref == 0 || !reg_get(ref, &v)) return fallback;
+  return mrb_class_ptr(v);
+}
 
 static mrb_value
 body_define_class(mrb_state *m, void *ud)
 {
   dm_def *def = (dm_def*)ud;
-  struct RClass *super = m->object_class;
-  if (def->target_ref != 0) {
-    mrb_value v;
-    reg_get(def->target_ref, &v);
-    super = mrb_class_ptr(v);
-  }
+  struct RClass *super = def_class(def->super_ref, m->object_class);
   return mrb_obj_value(mrb_define_class_id(m, mrb_intern(m, def->name, def->name_len), super));
 }
 
@@ -1009,8 +1038,76 @@ DM_EXPORT(dm_define_class)(uint32_t name, uint32_t name_len, int32_t super_ref)
     if (!reg_get(super_ref, &v)) return fail_internal("dm_define_class: unknown superclass ref");
     if (mrb_type(v) != MRB_TT_CLASS) return fail_internal("dm_define_class: superclass ref is not a Class");
   }
-  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, super_ref, 0, FALSE};
+  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, 0, super_ref, 0, DM_DEF_INSTANCE};
   return protected_run(body_define_class, &def);
+}
+
+static mrb_value
+body_define_module(mrb_state *m, void *ud)
+{
+  dm_def *def = (dm_def*)ud;
+  return mrb_obj_value(mrb_define_module_id(m, mrb_intern(m, def->name, def->name_len)));
+}
+
+int32_t
+DM_EXPORT(dm_define_module)(uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, 0, 0, 0, DM_DEF_INSTANCE};
+  return protected_run(body_define_module, &def);
+}
+
+/* The outer namespace of an _under entry point: a Class, a Module, or Object when the ref is 0. */
+static int32_t
+check_outer(int32_t outer_ref, const char *unknown, const char *wrong_kind)
+{
+  if (outer_ref == 0) return DM_OK;
+  mrb_value v;
+  if (!reg_get(outer_ref, &v)) return fail_internal(unknown);
+  if (mrb_type(v) != MRB_TT_CLASS && mrb_type(v) != MRB_TT_MODULE) return fail_internal(wrong_kind);
+  return DM_OK;
+}
+
+static mrb_value
+body_define_class_under(mrb_state *m, void *ud)
+{
+  dm_def *def = (dm_def*)ud;
+  struct RClass *outer = def_class(def->target_ref, m->object_class);
+  struct RClass *super = def_class(def->super_ref, m->object_class);
+  return mrb_obj_value(mrb_define_class_under_id(m, outer, mrb_intern(m, def->name, def->name_len), super));
+}
+
+int32_t
+DM_EXPORT(dm_define_class_under)(int32_t outer_ref, uint32_t name, uint32_t name_len, int32_t super_ref)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  int32_t rc = check_outer(outer_ref, "dm_define_class_under: unknown outer ref", "dm_define_class_under: outer ref is not a Class or Module");
+  if (rc != DM_OK) return rc;
+  if (super_ref != 0) {
+    mrb_value v;
+    if (!reg_get(super_ref, &v)) return fail_internal("dm_define_class_under: unknown superclass ref");
+    if (mrb_type(v) != MRB_TT_CLASS) return fail_internal("dm_define_class_under: superclass ref is not a Class");
+  }
+  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, outer_ref, super_ref, 0, DM_DEF_INSTANCE};
+  return protected_run(body_define_class_under, &def);
+}
+
+static mrb_value
+body_define_module_under(mrb_state *m, void *ud)
+{
+  dm_def *def = (dm_def*)ud;
+  struct RClass *outer = def_class(def->target_ref, m->object_class);
+  return mrb_obj_value(mrb_define_module_under_id(m, outer, mrb_intern(m, def->name, def->name_len)));
+}
+
+int32_t
+DM_EXPORT(dm_define_module_under)(int32_t outer_ref, uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  int32_t rc = check_outer(outer_ref, "dm_define_module_under: unknown outer ref", "dm_define_module_under: outer ref is not a Class or Module");
+  if (rc != DM_OK) return rc;
+  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, outer_ref, 0, 0, DM_DEF_INSTANCE};
+  return protected_run(body_define_module_under, &def);
 }
 
 static mrb_value
@@ -1028,15 +1125,17 @@ body_define_method(mrb_state *m, void *ud)
   mrb_method_t method;
   MRB_METHOD_FROM_PROC(method, p);
   mrb_sym mid = mrb_intern(m, def->name, def->name_len);
-  if (def->module_function) {
+  if (def->mode != DM_DEF_INSTANCE) {
     mrb_define_method_raw(m, mrb_singleton_class_ptr(m, mrb_obj_value(c)), mid, method);
   }
-  mrb_define_method_raw(m, c, mid, method);
+  if (def->mode != DM_DEF_SINGLETON) {
+    mrb_define_method_raw(m, c, mid, method);
+  }
   return mrb_symbol_value(mid);
 }
 
 static int32_t
-define_method_common(uint32_t name, uint32_t name_len, int32_t target_ref, int32_t fn_id, mrb_bool module_function)
+define_method_common(uint32_t name, uint32_t name_len, int32_t target_ref, int32_t fn_id, int32_t mode)
 {
   if (!mrb) return fail_internal("dm_init has not run");
   if (target_ref != 0) {
@@ -1046,20 +1145,210 @@ define_method_common(uint32_t name, uint32_t name_len, int32_t target_ref, int32
       return fail_internal("dm_define_method: target ref is not a Class or Module");
     }
   }
-  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, target_ref, fn_id, module_function};
+  dm_def def = {(const char*)(uintptr_t)name, (mrb_int)name_len, target_ref, 0, fn_id, mode};
   return protected_run(body_define_method, &def);
 }
 
 int32_t
 DM_EXPORT(dm_define_method)(int32_t target_ref, uint32_t name, uint32_t name_len, int32_t fn_id)
 {
-  return define_method_common(name, name_len, target_ref, fn_id, FALSE);
+  return define_method_common(name, name_len, target_ref, fn_id, DM_DEF_INSTANCE);
 }
 
 int32_t
 DM_EXPORT(dm_define_module_function)(int32_t target_ref, uint32_t name, uint32_t name_len, int32_t fn_id)
 {
-  return define_method_common(name, name_len, target_ref, fn_id, TRUE);
+  return define_method_common(name, name_len, target_ref, fn_id, DM_DEF_BOTH);
+}
+
+int32_t
+DM_EXPORT(dm_define_singleton_method)(int32_t target_ref, uint32_t name, uint32_t name_len, int32_t fn_id)
+{
+  return define_method_common(name, name_len, target_ref, fn_id, DM_DEF_SINGLETON);
+}
+
+/* --- constants and variables --------------------------------------------- */
+
+/* mrb_const_set and mrb_const_get take the name as given; Module#const_set is where mruby checks it (src/class.c, check_const_name_sym), and the ABI answers the same NameError. */
+static void
+const_name_check(mrb_state *m, mrb_sym sym)
+{
+  mrb_int len;
+  const char *name = mrb_sym_name_len(m, sym, &len);
+  if (!mrb_const_name_p(m, name, len)) {
+    mrb_name_error(m, sym, "wrong constant name %n", sym);
+  }
+}
+
+/* The namespace an entry point addresses by ref, Object when the ref is 0; a ref that is neither a Class nor a Module reaches mruby, which raises TypeError. */
+static mrb_value
+op_module(dm_op *op)
+{
+  mrb_value mod;
+  if (op->recv_ref == 0 || !reg_get(op->recv_ref, &mod)) return mrb_obj_value(mrb->object_class);
+  return mod;
+}
+
+/* A setter takes its value the way dm_capture_arg does: exactly one value in the scratch frame, consumed by the call. */
+static mrb_bool
+one_scratch_value(mrb_value *args)
+{
+  *args = consume_args();
+  return mrb_array_p(*args) && RARRAY_LEN(*args) == 1;
+}
+
+static mrb_value
+body_const_get(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
+  const_name_check(m, sym);
+  return mrb_const_get(m, op_module(op), sym);
+}
+
+int32_t
+DM_EXPORT(dm_const_get)(int32_t target_ref, uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value v;
+  if (target_ref != 0 && !reg_get(target_ref, &v)) return fail_internal("dm_const_get: unknown target ref");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, mrb_nil_value(), target_ref, 0, 0};
+  return protected_run(body_const_get, &op);
+}
+
+static mrb_value
+body_const_set(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
+  const_name_check(m, sym);
+  mrb_value v = mrb_ary_ref(m, op->args, 0);
+  mrb_const_set(m, op_module(op), sym, v);
+  return v;
+}
+
+int32_t
+DM_EXPORT(dm_const_set)(int32_t target_ref, uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value args;
+  if (!one_scratch_value(&args)) return fail_internal("dm_const_set: the scratch does not hold exactly one value");
+  mrb_value v;
+  if (target_ref != 0 && !reg_get(target_ref, &v)) return fail_internal("dm_const_set: unknown target ref");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, args, target_ref, 0, 0};
+  return finish_call(protected_run(body_const_set, &op), op.args);
+}
+
+static mrb_value
+body_const_defined(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
+  const_name_check(m, sym);
+  return mrb_bool_value(mrb_const_defined(m, op_module(op), sym));
+}
+
+int32_t
+DM_EXPORT(dm_const_defined)(int32_t target_ref, uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value v;
+  if (target_ref != 0 && !reg_get(target_ref, &v)) return fail_internal("dm_const_defined: unknown target ref");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, mrb_nil_value(), target_ref, 0, 0};
+  return protected_run(body_const_defined, &op);
+}
+
+static mrb_value
+body_gv_get(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  return mrb_gv_get(m, mrb_intern(m, op->ptr, op->len));
+}
+
+/* The name crosses verbatim, `$` included: mruby reads an unset global as nil whatever it is called. */
+int32_t
+DM_EXPORT(dm_gv_get)(uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, mrb_nil_value(), 0, 0, 0};
+  return protected_run(body_gv_get, &op);
+}
+
+static mrb_value
+body_gv_set(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_value v = mrb_ary_ref(m, op->args, 0);
+  mrb_gv_set(m, mrb_intern(m, op->ptr, op->len), v);
+  return v;
+}
+
+int32_t
+DM_EXPORT(dm_gv_set)(uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value args;
+  if (!one_scratch_value(&args)) return fail_internal("dm_gv_set: the scratch does not hold exactly one value");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, args, 0, 0, 0};
+  return finish_call(protected_run(body_gv_set, &op), op.args);
+}
+
+static mrb_value
+body_iv_get(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_value recv;
+  reg_get(op->recv_ref, &recv);
+  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
+  mrb_iv_name_sym_check(m, sym);
+  return mrb_iv_get(m, recv, sym);
+}
+
+/* mrb_iv_get and mrb_iv_set take the name as given, so the `@` check mruby applies in Object#instance_variable_get is made here. */
+int32_t
+DM_EXPORT(dm_iv_get)(int32_t recv_ref, uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value recv;
+  if (!reg_get(recv_ref, &recv)) return fail_internal("dm_iv_get: unknown receiver ref");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, mrb_nil_value(), recv_ref, 0, 0};
+  return protected_run(body_iv_get, &op);
+}
+
+static mrb_value
+body_iv_set(mrb_state *m, void *ud)
+{
+  dm_op *op = (dm_op*)ud;
+  mrb_value recv;
+  reg_get(op->recv_ref, &recv);
+  mrb_sym sym = mrb_intern(m, op->ptr, op->len);
+  mrb_iv_name_sym_check(m, sym);
+  mrb_value v = mrb_ary_ref(m, op->args, 0);
+  mrb_iv_set(m, recv, sym, v);
+  return v;
+}
+
+int32_t
+DM_EXPORT(dm_iv_set)(int32_t recv_ref, uint32_t name, uint32_t name_len)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  mrb_value args;
+  if (!one_scratch_value(&args)) return fail_internal("dm_iv_set: the scratch does not hold exactly one value");
+  mrb_value recv;
+  if (!reg_get(recv_ref, &recv)) return fail_internal("dm_iv_set: unknown receiver ref");
+  dm_op op = {(const char*)(uintptr_t)name, (mrb_int)name_len, args, recv_ref, 0, 0};
+  return finish_call(protected_run(body_iv_set, &op), op.args);
+}
+
+/* --- garbage collection -------------------------------------------------- */
+
+int32_t
+DM_EXPORT(dm_full_gc)(void)
+{
+  if (!mrb) return fail_internal("dm_init has not run");
+  internal_error = NULL;
+  mrb_full_gc(mrb);
+  return DM_OK;
 }
 
 /* --- host arguments ------------------------------------------------------ */

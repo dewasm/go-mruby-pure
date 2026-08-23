@@ -1047,6 +1047,347 @@ func TestModuleFunctionDefinition(t *testing.T) {
 	}
 }
 
+func TestModuleDefinition(t *testing.T) {
+	table := hostTable{}
+	in := newVM(t, nil, nil, table)
+
+	table[51] = func(vm *Instance) int32 {
+		_ = vm.ArgsReset()
+		_ = vm.PushString("from the module")
+		return 0
+	}
+	mod, err := in.DefineModule("Toolbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(mod)
+	if err := in.DefineModuleFunction(mod, "describe", 51); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "Toolbox.class.to_s", false); v.Str != "Module" {
+		t.Errorf("Toolbox is a %s, want a Module", v.Str)
+	}
+	if v := mustEval(t, in, "Toolbox.describe", false); v.Str != "from the module" {
+		t.Errorf("Toolbox.describe = %+v", v)
+	}
+}
+
+func TestDefinitionsUnderANamespace(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	outer, err := in.DefineModule("Outer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(outer)
+
+	base, err := in.DefineClassUnder(outer, "Base", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(base)
+	inner, err := in.DefineClassUnder(outer, "Inner", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(inner)
+	nested, err := in.DefineModuleUnder(outer, "Nested")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(nested)
+
+	// The constant path is what makes the definition reachable from Ruby.
+	if v := mustEval(t, in, "Outer::Inner.new.class.to_s", false); v.Str != "Outer::Inner" {
+		t.Errorf("Outer::Inner.new is a %q", v.Str)
+	}
+	if v := mustEval(t, in, "Outer::Inner.superclass.to_s", false); v.Str != "Outer::Base" {
+		t.Errorf("Outer::Inner.superclass = %q", v.Str)
+	}
+	if v := mustEval(t, in, "Outer::Nested.class.to_s", false); v.Str != "Module" {
+		t.Errorf("Outer::Nested is a %s, want a Module", v.Str)
+	}
+	// Object stays clean: the names live under the outer module alone.
+	if v := mustEval(t, in, "Object.const_defined?(:Inner)", false); v.Kind != KindFalse {
+		t.Errorf("Inner is defined under Object too (%v)", v.Kind)
+	}
+
+	if _, err := in.DefineClassUnder(9999, "Nope", 0); err == nil {
+		t.Error("DefineClassUnder with an unknown outer ref succeeded")
+	}
+	notAModule := mustEval(t, in, "42", true)
+	defer in.ReleaseRef(notAModule.Ref)
+	if _, err := in.DefineModuleUnder(notAModule.Ref, "Nope"); err == nil {
+		t.Error("DefineModuleUnder with an Integer as the namespace succeeded")
+	}
+}
+
+func TestSingletonMethodIsOnTheClassOnly(t *testing.T) {
+	table := hostTable{}
+	in := newVM(t, nil, nil, table)
+
+	table[52] = func(vm *Instance) int32 {
+		_ = vm.ArgsReset()
+		_ = vm.PushString("built")
+		return 0
+	}
+	cls, err := in.DefineClass("Gadget", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(cls)
+	if err := in.DefineSingletonMethod(cls, "build", 52); err != nil {
+		t.Fatal(err)
+	}
+
+	if v := mustEval(t, in, "Gadget.build", false); v.Str != "built" {
+		t.Errorf("Gadget.build = %+v", v)
+	}
+	_, err = in.Eval("Gadget.new.build", false)
+	var re *RubyError
+	if !errors.As(err, &re) {
+		t.Fatalf("Gadget.new.build = %v (%T), want *RubyError", err, err)
+	}
+	if re.Class != "NoMethodError" {
+		t.Errorf("Gadget.new.build raised %s, want NoMethodError: a class method is not on the instance side", re.Class)
+	}
+}
+
+func TestConstants(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushInt(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.ConstSet(0, "GoMade"); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "GoMade", false); v.Int != 7 {
+		t.Errorf("GoMade = %+v, want 7", v)
+	}
+	v, err := in.ConstGet(0, "GoMade", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Int != 7 {
+		t.Errorf("ConstGet(GoMade) = %+v", v)
+	}
+	if defined, err := in.ConstDefined(0, "GoMade"); err != nil || !defined {
+		t.Errorf("ConstDefined(GoMade) = %v, %v", defined, err)
+	}
+	if defined, err := in.ConstDefined(0, "NotThere"); err != nil || defined {
+		t.Errorf("ConstDefined(NotThere) = %v, %v", defined, err)
+	}
+
+	// A constant on a class of its own.
+	cls, err := in.DefineClass("Holder", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.ReleaseRef(cls)
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushString("1.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.ConstSet(cls, "VERSION"); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "Holder::VERSION", false); v.Str != "1.0" {
+		t.Errorf("Holder::VERSION = %+v", v)
+	}
+	if v, err := in.ConstGet(cls, "VERSION", false); err != nil || v.Str != "1.0" {
+		t.Errorf("ConstGet(Holder, VERSION) = %+v, %v", v, err)
+	}
+
+	// A name that is not a constant name.
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushInt(1); err != nil {
+		t.Fatal(err)
+	}
+	err = in.ConstSet(0, "lowercase")
+	var re *RubyError
+	if !errors.As(err, &re) {
+		t.Fatalf("ConstSet of a lowercase name = %v (%T), want *RubyError", err, err)
+	}
+	if re.Class != "NameError" {
+		t.Errorf("ConstSet of a lowercase name raised %s, want NameError", re.Class)
+	}
+
+	_, err = in.ConstGet(0, "Uninitialized", false)
+	if !errors.As(err, &re) {
+		t.Fatalf("ConstGet of an uninitialized constant = %v (%T), want *RubyError", err, err)
+	}
+	if re.Class != "NameError" {
+		t.Errorf("ConstGet of an uninitialized constant raised %s, want NameError", re.Class)
+	}
+
+	// The scratch is consumed whether the set went through or not.
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.ConstSet(0, "Empty"); err == nil {
+		t.Error("ConstSet with an empty scratch succeeded")
+	}
+}
+
+func TestGlobalVariables(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushString("set from Go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.GlobalSet("$from_go"); err != nil {
+		t.Fatal(err)
+	}
+	v, err := in.GlobalGet("$from_go", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Str != "set from Go" {
+		t.Errorf("GlobalGet($from_go) = %+v", v)
+	}
+	if got := mustEval(t, in, "$from_go", false); got.Str != "set from Go" {
+		t.Errorf("Ruby sees $from_go as %+v", got)
+	}
+
+	mustEval(t, in, "$from_ruby = [1, 2]", false)
+	if v, err := in.GlobalGet("$from_ruby", false); err != nil || v.Kind != KindArray {
+		t.Errorf("GlobalGet($from_ruby) = %+v, %v", v, err)
+	}
+	if v, err := in.GlobalGet("$never_set", false); err != nil || v.Kind != KindNil {
+		t.Errorf("GlobalGet of an unset global = %+v, %v; want nil", v, err)
+	}
+}
+
+func TestInstanceVariables(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	obj := mustEval(t, in, "Object.new", true)
+	defer in.ReleaseRef(obj.Ref)
+
+	if v, err := in.IVGet(obj.Ref, "@tag", false); err != nil || v.Kind != KindNil {
+		t.Errorf("IVGet of an unset instance variable = %+v, %v; want nil", v, err)
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushString("tagged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.IVSet(obj.Ref, "@tag"); err != nil {
+		t.Fatal(err)
+	}
+	v, err := in.IVGet(obj.Ref, "@tag", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Str != "tagged" {
+		t.Errorf("IVGet(@tag) = %+v", v)
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushSymbol("@tag"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := in.Call(obj.Ref, "instance_variable_get", false); err != nil || got.Str != "tagged" {
+		t.Errorf("Ruby sees @tag as %+v (%v)", got, err)
+	}
+
+	// mruby validates the name, so a name without `@` is an error rather than a second namespace.
+	_, err = in.IVGet(obj.Ref, "tag", false)
+	var re *RubyError
+	if !errors.As(err, &re) {
+		t.Fatalf("IVGet of a name without @ = %v (%T), want *RubyError", err, err)
+	}
+	if re.Class != "NameError" {
+		t.Errorf("IVGet of a name without @ raised %s, want NameError", re.Class)
+	}
+	if err := in.ArgsReset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.PushInt(1); err != nil {
+		t.Fatal(err)
+	}
+	err = in.IVSet(obj.Ref, "tag")
+	if !errors.As(err, &re) || re.Class != "NameError" {
+		t.Errorf("IVSet of a name without @ = %v, want a NameError", err)
+	}
+
+	if _, err := in.IVGet(0, "@tag", false); err == nil {
+		t.Error("IVGet with ref 0 succeeded: there is no default receiver")
+	}
+	if _, err := in.IVGet(9999, "@tag", false); err == nil {
+		t.Error("IVGet with an unknown ref succeeded")
+	}
+}
+
+func TestEvalFileNamesTheSource(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	v, err := in.EvalFile("__FILE__", "app.rb", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Str != "app.rb" {
+		t.Errorf("__FILE__ under EvalFile = %+v, want app.rb", v)
+	}
+
+	_, err = in.EvalFile("def boom; raise 'from the file'; end; boom", "lib/thing.rb", false)
+	var re *RubyError
+	if !errors.As(err, &re) {
+		t.Fatalf("EvalFile of a raising source = %v (%T), want *RubyError", err, err)
+	}
+	if !strings.Contains(re.Backtrace, "lib/thing.rb") {
+		t.Errorf("backtrace = %q, want it to name lib/thing.rb", re.Backtrace)
+	}
+
+	// The filename belongs to that one eval: the shared compiler context is back to "(eval)" afterwards.
+	if v := mustEval(t, in, "__FILE__", false); v.Str != "(eval)" {
+		t.Errorf("__FILE__ after EvalFile = %+v", v)
+	}
+	_, err = in.Eval("def boom2; raise 'plain'; end; boom2", false)
+	if !errors.As(err, &re) {
+		t.Fatalf("Eval of a raising source = %v (%T), want *RubyError", err, err)
+	}
+	if strings.Contains(re.Backtrace, "lib/thing.rb") {
+		t.Errorf("a later Eval still reports the EvalFile name: %q", re.Backtrace)
+	}
+}
+
+func TestFullGCKeepsTheRegistry(t *testing.T) {
+	in := newVM(t, nil, nil, nil)
+
+	held := mustEval(t, in, "'pinned' * 3", true)
+	defer in.ReleaseRef(held.Ref)
+	if err := in.FullGC(); err != nil {
+		t.Fatal(err)
+	}
+	size, err := in.Call(held.Ref, "size", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size.Int != 18 {
+		t.Errorf("the held String is %d characters after a full GC, want 18", size.Int)
+	}
+	if err := in.FullGC(); err != nil {
+		t.Fatal(err)
+	}
+	if v := mustEval(t, in, "'still running'", false); v.Str != "still running" {
+		t.Errorf("after a full GC: %+v", v)
+	}
+}
+
 func TestMissingExportFailsLoud(t *testing.T) {
 	in := newVM(t, nil, nil, nil)
 	saved := in.mod.Exports["dm_eval"]

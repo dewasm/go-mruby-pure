@@ -163,6 +163,7 @@ type dmFuncs struct {
 	free   func(uint32)
 
 	eval      func(uint32, uint32) uint32
+	evalFile  func(uint32, uint32, uint32, uint32) uint32
 	call      func(uint32, uint32, uint32) uint32
 	callBlock func(uint32, uint32, uint32, uint32) uint32
 	yield     func(uint32) uint32
@@ -206,9 +207,23 @@ type dmFuncs struct {
 	hashKeys func(uint32) uint32
 	hashGet  func(uint32, uint32) uint32
 
-	defineClass          func(uint32, uint32, uint32) uint32
-	defineMethod         func(uint32, uint32, uint32, uint32) uint32
-	defineModuleFunction func(uint32, uint32, uint32, uint32) uint32
+	defineClass           func(uint32, uint32, uint32) uint32
+	defineModule          func(uint32, uint32) uint32
+	defineClassUnder      func(uint32, uint32, uint32, uint32) uint32
+	defineModuleUnder     func(uint32, uint32, uint32) uint32
+	defineMethod          func(uint32, uint32, uint32, uint32) uint32
+	defineModuleFunction  func(uint32, uint32, uint32, uint32) uint32
+	defineSingletonMethod func(uint32, uint32, uint32, uint32) uint32
+
+	constGet     func(uint32, uint32, uint32) uint32
+	constSet     func(uint32, uint32, uint32) uint32
+	constDefined func(uint32, uint32, uint32) uint32
+	gvGet        func(uint32, uint32) uint32
+	gvSet        func(uint32, uint32) uint32
+	ivGet        func(uint32, uint32, uint32) uint32
+	ivSet        func(uint32, uint32, uint32) uint32
+
+	fullGC func() uint32
 
 	hostargsCount  func() uint32
 	hostargsKind   func(uint32) uint32
@@ -248,6 +263,7 @@ func bindFuncs(m *Mrubyvm) (dmFuncs, error) {
 	bindTo(m, "dm_alloc", &f.alloc, &err)
 	bindTo(m, "dm_free", &f.free, &err)
 	bindTo(m, "dm_eval", &f.eval, &err)
+	bindTo(m, "dm_eval_file", &f.evalFile, &err)
 	bindTo(m, "dm_call", &f.call, &err)
 	bindTo(m, "dm_call_block", &f.callBlock, &err)
 	bindTo(m, "dm_yield", &f.yield, &err)
@@ -285,8 +301,20 @@ func bindFuncs(m *Mrubyvm) (dmFuncs, error) {
 	bindTo(m, "dm_hash_keys", &f.hashKeys, &err)
 	bindTo(m, "dm_hash_get", &f.hashGet, &err)
 	bindTo(m, "dm_define_class", &f.defineClass, &err)
+	bindTo(m, "dm_define_module", &f.defineModule, &err)
+	bindTo(m, "dm_define_class_under", &f.defineClassUnder, &err)
+	bindTo(m, "dm_define_module_under", &f.defineModuleUnder, &err)
 	bindTo(m, "dm_define_method", &f.defineMethod, &err)
 	bindTo(m, "dm_define_module_function", &f.defineModuleFunction, &err)
+	bindTo(m, "dm_define_singleton_method", &f.defineSingletonMethod, &err)
+	bindTo(m, "dm_const_get", &f.constGet, &err)
+	bindTo(m, "dm_const_set", &f.constSet, &err)
+	bindTo(m, "dm_const_defined", &f.constDefined, &err)
+	bindTo(m, "dm_gv_get", &f.gvGet, &err)
+	bindTo(m, "dm_gv_set", &f.gvSet, &err)
+	bindTo(m, "dm_iv_get", &f.ivGet, &err)
+	bindTo(m, "dm_iv_set", &f.ivSet, &err)
+	bindTo(m, "dm_full_gc", &f.fullGC, &err)
 	bindTo(m, "dm_hostargs_count", &f.hostargsCount, &err)
 	bindTo(m, "dm_hostargs_kind", &f.hostargsKind, &err)
 	bindTo(m, "dm_hostargs_int", &f.hostargsInt, &err)
@@ -455,6 +483,27 @@ func (in *Instance) Eval(src string, wantRef bool) (v Value, err error) {
 	}
 	defer in.drop(g)
 	if err := in.status(in.fn.eval(g.ptr, g.len)); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
+}
+
+// EvalFile is Eval with filename as the name this one compilation reports in `__FILE__` and in a backtrace.
+func (in *Instance) EvalFile(src, filename string, wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(src)
+	if err != nil {
+		return Value{}, err
+	}
+	defer in.drop(g)
+	f, err := in.push(filename)
+	if err != nil {
+		return Value{}, err
+	}
+	defer in.drop(f)
+	if err := in.status(in.fn.evalFile(g.ptr, g.len, f.ptr, f.len)); err != nil {
 		return Value{}, err
 	}
 	return in.value(wantRef), nil
@@ -711,6 +760,54 @@ func (in *Instance) DefineClass(name string, superRef int32) (ref int32, err err
 	return int32(in.fn.resultRef()), nil
 }
 
+// DefineModule defines name as a module under Object and returns a ref to it.
+func (in *Instance) DefineModule(name string) (ref int32, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return 0, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.defineModule(g.ptr, g.len)); err != nil {
+		return 0, err
+	}
+	return int32(in.fn.resultRef()), nil
+}
+
+// DefineClassUnder is DefineClass with the class or module behind outerRef as the namespace, or Object when outerRef is 0.
+func (in *Instance) DefineClassUnder(outerRef int32, name string, superRef int32) (ref int32, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return 0, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.defineClassUnder(uint32(outerRef), g.ptr, g.len, uint32(superRef))); err != nil {
+		return 0, err
+	}
+	return int32(in.fn.resultRef()), nil
+}
+
+// DefineModuleUnder is DefineModule with the class or module behind outerRef as the namespace, or Object when outerRef is 0.
+func (in *Instance) DefineModuleUnder(outerRef int32, name string) (ref int32, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return 0, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.defineModuleUnder(uint32(outerRef), g.ptr, g.len)); err != nil {
+		return 0, err
+	}
+	return int32(in.fn.resultRef()), nil
+}
+
 // DefineMethod makes name on the class or module behind targetRef, or on Kernel when targetRef is 0, call back into hostCall with fnID.
 func (in *Instance) DefineMethod(targetRef int32, name string, fnID int32) (err error) {
 	defer in.enter()()
@@ -735,6 +832,131 @@ func (in *Instance) DefineModuleFunction(targetRef int32, name string, fnID int3
 	}
 	defer in.drop(g)
 	return in.status(in.fn.defineModuleFunction(uint32(targetRef), g.ptr, g.len, uint32(fnID)))
+}
+
+// DefineSingletonMethod makes name on the singleton class of the class or module behind targetRef, which is what a Ruby class method is, call back into hostCall with fnID.
+func (in *Instance) DefineSingletonMethod(targetRef int32, name string, fnID int32) (err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return err
+	}
+	defer in.drop(g)
+	return in.status(in.fn.defineSingletonMethod(uint32(targetRef), g.ptr, g.len, uint32(fnID)))
+}
+
+// --- constants and variables ---------------------------------------------
+
+// ConstGet reads the constant name from the class or module behind targetRef, or from Object when targetRef is 0; an uninitialized constant is a Ruby NameError.
+func (in *Instance) ConstGet(targetRef int32, name string, wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return Value{}, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.constGet(uint32(targetRef), g.ptr, g.len)); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
+}
+
+// ConstSet stores the one value in the argument scratch as the constant name on the class or module behind targetRef, or on Object when targetRef is 0.
+func (in *Instance) ConstSet(targetRef int32, name string) (err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return err
+	}
+	defer in.drop(g)
+	return in.status(in.fn.constSet(uint32(targetRef), g.ptr, g.len))
+}
+
+// ConstDefined answers whether the constant name resolves from the class or module behind targetRef, or from Object when targetRef is 0.
+func (in *Instance) ConstDefined(targetRef int32, name string) (defined bool, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return false, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.constDefined(uint32(targetRef), g.ptr, g.len)); err != nil {
+		return false, err
+	}
+	return Kind(int32(in.fn.resultKind())) == KindTrue, nil
+}
+
+// GlobalGet reads the global variable name, which carries its `$` and is not validated; an unset global reads as nil.
+func (in *Instance) GlobalGet(name string, wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return Value{}, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.gvGet(g.ptr, g.len)); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
+}
+
+// GlobalSet stores the one value in the argument scratch in the global variable name, which carries its `$` and is not validated.
+func (in *Instance) GlobalSet(name string) (err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return err
+	}
+	defer in.drop(g)
+	return in.status(in.fn.gvSet(g.ptr, g.len))
+}
+
+// IVGet reads the instance variable name from the value behind recvRef; a name without `@` is a Ruby NameError.
+func (in *Instance) IVGet(recvRef int32, name string, wantRef bool) (v Value, err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return Value{}, err
+	}
+	defer in.drop(g)
+	if err := in.status(in.fn.ivGet(uint32(recvRef), g.ptr, g.len)); err != nil {
+		return Value{}, err
+	}
+	return in.value(wantRef), nil
+}
+
+// IVSet stores the one value in the argument scratch in the instance variable name of the value behind recvRef; a name without `@` is a Ruby NameError.
+func (in *Instance) IVSet(recvRef int32, name string) (err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+
+	g, err := in.push(name)
+	if err != nil {
+		return err
+	}
+	defer in.drop(g)
+	return in.status(in.fn.ivSet(uint32(recvRef), g.ptr, g.len))
+}
+
+// FullGC runs a full garbage collection; a held ref survives it, which is what the registry is for.
+func (in *Instance) FullGC() (err error) {
+	defer in.enter()()
+	defer in.guard(&err)
+	return in.status(in.fn.fullGC())
 }
 
 // --- host callbacks ------------------------------------------------------
