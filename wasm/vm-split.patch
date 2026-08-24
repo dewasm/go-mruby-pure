@@ -1,0 +1,293 @@
+A split-out variant of mrb_vm_exec() for the pinned mruby 4.0.0 source, applied only to the wasm build this repository converts to Go.
+The shared tail of the send opcodes, the block that L_SENDB_SYM labels and that OP_SEND, OP_SEND0, OP_SENDB, the OP_SSEND family, OP_SUPER, OP_SETIDX and every L_SEND_SYM fallback jump into, moves into a static function marked __attribute__((noinline)), with each case exit turned into a return code that VS_DISPATCH() decodes at the call site and each dispatcher local the body writes (irep, ci, and the value the CINFO_RESUMED path returns from mrb_vm_exec) passed by pointer.
+Behavior is unchanged; what changes is the shape the Go backend sees after conversion.
+mrb_vm_exec() converts into one Go method of about 29,000 lines, and CPU profiles of fib, lists and ao attribute the time to that method's own body rather than to its callees, so what the Go compiler has to register-allocate inside a single enormous function is the hot opcode bodies themselves; the send tail is the largest of them and the one every benchmark runs most.
+noinline is what keeps it split: LLVM would otherwise inline this single-caller function straight back into the dispatcher. wasm-opt does not run on this build (WASM_OPT=0), so Binaryen's inliner is not a concern.
+The moved code is byte-identical to the original apart from those rewrites, and it is tied to the line shape of the 4.0.0 source: a version bump needs the extraction redone against the new source, not this patch rebased onto it.
+Only the send tail is split, because both wider splits measured worse.
+Moving OP_ENTER and the OP_RETURN family (OP_RETURN with its OP_RETSELF/RETNIL/RETTRUE/RETFALSE entries, plus OP_BREAK and OP_RETURN_BLK, which jump into its labels) out as well made fib 17% slower than the unpatched build instead of 3% faster: a Ruby-level call then pays three out-of-line calls where it now pays one.
+Keeping those inline but adding the medium-sized bodies (OP_CALL, OP_BLKCALL, OP_ARGARY, OP_GETIDX, OP_GETIDX0, OP_SETIDX, OP_APOST, OP_BLKPUSH, OP_EXEC, OP_CLASS, OP_MODULE) still cost 4.6% on fib, 4.8% on ao and 7.4% on lists against splitting the send tail alone.
+Small bodies (OP_MOVE, the OP_LOADI family, the fixnum fast paths of OP_ADD/OP_SUB/OP_EQ and friends) never move: a 5-10 line dispatch state cannot carry a call.
+
+--- a/src/vm.c
++++ b/src/vm.c
+@@ -1651,7 +1651,153 @@
+ }
+ 
+ #define ary_new_from_regs(mrb, argc, idx) mrb_ary_new_from_values(mrb, (argc), &regs[idx]);
++
++/**** dewasm experiment: the send tail split out of mrb_vm_exec() ****/
++#if defined(__GNUC__) || defined(__clang__)
++#define VS_NOINLINE __attribute__((noinline))
++#else
++#define VS_NOINLINE
++#endif
++
++/* Case exits, encoded as return codes and decoded by VS_DISPATCH(). */
++#define VS_NEXT         0   /* NEXT / JUMP */
++#define VS_RAISE        1   /* goto L_RAISE */
++#define VS_RETURN       2   /* return the value stored in *pret */
++
++static VS_NOINLINE int
++vmop_send(mrb_state *mrb, mrb_code insn, uint32_t a, uint16_t c, mrb_sym mid,
++          int ai, struct mrb_jmpbuf *prev_jmp,
++          const mrb_irep **pirep, mrb_callinfo **pci, mrb_value *pret)
++{
++  const mrb_irep *irep = *pirep;
++  mrb_callinfo *ci = *pci;
++  mrb_method_t m;
++  mrb_value recv, blk;
++  mrb_int bidx, new_bidx;
++
++  if (mrb_likely(c < CALL_MAXARGS)) {
++    /* fast path limited to fixed length arguments of less than 15 */
++    bidx = a + c + 1 /* self */;
++    new_bidx = bidx;
++  }
++  else {
++    int n = c&0xf;
++    int nk = (c>>4)&0xf;
++    bidx = a + mrb_bidx(n,nk);
++    new_bidx = bidx;
++    if (nk == CALL_MAXARGS) {
++      mrb_ensure_hash_type(mrb, regs[a+(n==CALL_MAXARGS?1:n)+1]);
++    }
++    else if (nk > 0) {  /* pack keyword arguments */
++      mrb_int kidx = a+(n==CALL_MAXARGS?1:n)+1;
++      mrb_value kdict = hash_new_from_regs(mrb, nk, kidx);
++      ci = mrb->c->ci;
++      regs[kidx] = kdict;
++      nk = CALL_MAXARGS;
++      c = n | (nk<<4);
++      new_bidx = a+mrb_bidx(n, nk);
++    }
++  }
++
++  mrb_assert(bidx < irep->nregs);
++  if (insn == OP_SEND || insn == OP_SEND0 || insn == OP_SSEND || insn == OP_SSEND0) {
++    /* clear block argument */
++    SET_NIL_VALUE(regs[new_bidx]);
++    SET_NIL_VALUE(blk);
++  }
++  else {
++    blk = ensure_block(mrb, regs[bidx]);
++    ci = mrb->c->ci;
++    regs[new_bidx] = blk;
++  }
++
++  ci = cipush(mrb, a, CINFO_DIRECT, NULL, NULL, BLK_PTR(blk), 0, c);
++  recv = regs[0];
++  ci->u.target_class = (insn == OP_SUPER) ? CI_TARGET_CLASS(ci - 1)->super : mrb_class(mrb, recv);
++  m = mrb_vm_find_method(mrb, ci->u.target_class, &ci->u.target_class, mid);
++  if (mrb_unlikely(MRB_METHOD_UNDEF_P(m))) {
++    m = prepare_missing(mrb, ci, recv, mid, blk, (insn == OP_SUPER));
++  }
++  else {
++    ci->mid = mid;
++  }
++  if (insn == OP_SEND || insn == OP_SEND0 || insn == OP_SENDB) {
++    mrb_bool priv = TRUE;
++    if (m.flags & MRB_METHOD_PRIVATE_FL) {
++    vis_err:;
++      mrb_value args = (ci->n == 15) ? regs[1] : mrb_ary_new_from_values(mrb, ci->n, regs+1);
++      vis_error(mrb, mid, args, recv, priv);
++    }
++    else if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(mrb, recv, ci->u.target_class)) {
++      priv = FALSE;
++      goto vis_err;
++    }
++  }
++  ci->cci = CINFO_NONE;
+ 
++  if (MRB_METHOD_PROC_P(m)) {
++    const struct RProc *p = MRB_METHOD_PROC(m);
++    /* handle alias */
++    MRB_PROC_RESOLVE_ALIAS(ci, p);
++    CI_PROC_SET(ci, p);
++    if (!MRB_PROC_CFUNC_P(p)) {
++      /* setup environment for calling method */
++      irep = p->body.irep;
++      stack_extend(mrb, (irep->nregs < 4) ? 4 : irep->nregs);
++      ci->pc = irep->iseq;
++      *pirep = irep;
++      *pci = ci;
++      return VS_NEXT;
++    }
++    else {
++      if (MRB_PROC_NOARG_P(p) && (ci->n > 0 || ci->nk > 0)) {
++        check_argument_count(mrb, ci, 0);
++      }
++      recv = MRB_PROC_CFUNC(p)(mrb, recv);
++    }
++  }
++  else {
++    check_argument_count(mrb, ci, MRB_MT_ASPEC(m.flags));
++    recv = MRB_METHOD_FUNC(m)(mrb, recv);
++  }
++
++  /* cfunc epilogue */
++  mrb_gc_arena_shrink(mrb, ai);
++  if (mrb_unlikely(mrb->exc)) return VS_RAISE;
++  ci = mrb->c->ci;
++  if (!ci->u.keep_context) { /* return from context modifying method (resume/yield) */
++    if (ci->cci == CINFO_RESUMED) {
++      mrb->jmp = prev_jmp;
++      *pret = recv;
++      return VS_RETURN;
++    }
++    else {
++      mrb_assert(!MRB_PROC_CFUNC_P(ci[-1].proc));
++      irep = ci[-1].proc->body.irep;
++    }
++  }
++  mrb_assert(ci > mrb->c->cibase);
++  ci->stack[0] = recv;
++  /* pop stackpos */
++  ci = cipop(mrb);
++  *pirep = irep;
++  *pci = ci;
++  return VS_NEXT;
++}
++
++/* Decodes the return code of vmop_send() back into the case exit it stands
++ * for; only usable inside mrb_vm_exec(). */
++#define VS_DISPATCH(call) do { \
++  switch (call) { \
++  case VS_NEXT:         NEXT; \
++  case VS_RAISE:        goto L_RAISE; \
++  case VS_RETURN:       return vs_ret; \
++  } \
++  NEXT; \
++} while (0)
++
++/**** end of the split-out send tail ****/
++
+ /**
+  * @brief Executes a sequence of mruby bytecode instructions.
+  *
+@@ -1693,6 +1839,7 @@
+   uint16_t c;
+   mrb_sym mid;
+   const struct mrb_irep_catch_handler *ch;
++  mrb_value vs_ret;             /* return value handed back by vmop_send() */
+ 
+ #ifndef MRB_USE_VM_SWITCH_DISPATCH
+   static const void * const optable[] = {
+@@ -2262,116 +2409,8 @@
+     L_SENDB:
+     mid = irep->syms[b];
+     L_SENDB_SYM:
+-    {
+-      mrb_method_t m;
+-      mrb_value recv, blk;
+-      mrb_int bidx, new_bidx;
+-
+-      if (mrb_likely(c < CALL_MAXARGS)) {
+-        /* fast path limited to fixed length arguments of less than 15 */
+-        bidx = a + c + 1 /* self */;
+-        new_bidx = bidx;
+-      }
+-      else {
+-        int n = c&0xf;
+-        int nk = (c>>4)&0xf;
+-        bidx = a + mrb_bidx(n,nk);
+-        new_bidx = bidx;
+-        if (nk == CALL_MAXARGS) {
+-          mrb_ensure_hash_type(mrb, regs[a+(n==CALL_MAXARGS?1:n)+1]);
+-        }
+-        else if (nk > 0) {  /* pack keyword arguments */
+-          mrb_int kidx = a+(n==CALL_MAXARGS?1:n)+1;
+-          mrb_value kdict = hash_new_from_regs(mrb, nk, kidx);
+-          ci = mrb->c->ci;
+-          regs[kidx] = kdict;
+-          nk = CALL_MAXARGS;
+-          c = n | (nk<<4);
+-          new_bidx = a+mrb_bidx(n, nk);
+-        }
+-      }
+-
+-      mrb_assert(bidx < irep->nregs);
+-      if (insn == OP_SEND || insn == OP_SEND0 || insn == OP_SSEND || insn == OP_SSEND0) {
+-        /* clear block argument */
+-        SET_NIL_VALUE(regs[new_bidx]);
+-        SET_NIL_VALUE(blk);
+-      }
+-      else {
+-        blk = ensure_block(mrb, regs[bidx]);
+-        ci = mrb->c->ci;
+-        regs[new_bidx] = blk;
+-      }
+-
+-      ci = cipush(mrb, a, CINFO_DIRECT, NULL, NULL, BLK_PTR(blk), 0, c);
+-      recv = regs[0];
+-      ci->u.target_class = (insn == OP_SUPER) ? CI_TARGET_CLASS(ci - 1)->super : mrb_class(mrb, recv);
+-      m = mrb_vm_find_method(mrb, ci->u.target_class, &ci->u.target_class, mid);
+-      if (mrb_unlikely(MRB_METHOD_UNDEF_P(m))) {
+-        m = prepare_missing(mrb, ci, recv, mid, blk, (insn == OP_SUPER));
+-      }
+-      else {
+-        ci->mid = mid;
+-      }
+-      if (insn == OP_SEND || insn == OP_SEND0 || insn == OP_SENDB) {
+-        mrb_bool priv = TRUE;
+-        if (m.flags & MRB_METHOD_PRIVATE_FL) {
+-        vis_err:;
+-          mrb_value args = (ci->n == 15) ? regs[1] : mrb_ary_new_from_values(mrb, ci->n, regs+1);
+-          vis_error(mrb, mid, args, recv, priv);
+-        }
+-        else if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(mrb, recv, ci->u.target_class)) {
+-          priv = FALSE;
+-          goto vis_err;
+-        }
+-      }
+-      ci->cci = CINFO_NONE;
++    VS_DISPATCH(vmop_send(mrb, insn, a, c, mid, ai, prev_jmp, &irep, &ci, &vs_ret));
+ 
+-      if (MRB_METHOD_PROC_P(m)) {
+-        const struct RProc *p = MRB_METHOD_PROC(m);
+-        /* handle alias */
+-        MRB_PROC_RESOLVE_ALIAS(ci, p);
+-        CI_PROC_SET(ci, p);
+-        if (!MRB_PROC_CFUNC_P(p)) {
+-          /* setup environment for calling method */
+-          irep = p->body.irep;
+-          stack_extend(mrb, (irep->nregs < 4) ? 4 : irep->nregs);
+-          ci->pc = irep->iseq;
+-          JUMP;
+-        }
+-        else {
+-          if (MRB_PROC_NOARG_P(p) && (ci->n > 0 || ci->nk > 0)) {
+-            check_argument_count(mrb, ci, 0);
+-          }
+-          recv = MRB_PROC_CFUNC(p)(mrb, recv);
+-        }
+-      }
+-      else {
+-        check_argument_count(mrb, ci, MRB_MT_ASPEC(m.flags));
+-        recv = MRB_METHOD_FUNC(m)(mrb, recv);
+-      }
+-
+-      /* cfunc epilogue */
+-      mrb_gc_arena_shrink(mrb, ai);
+-      if (mrb_unlikely(mrb->exc)) goto L_RAISE;
+-      ci = mrb->c->ci;
+-      if (!ci->u.keep_context) { /* return from context modifying method (resume/yield) */
+-        if (ci->cci == CINFO_RESUMED) {
+-          mrb->jmp = prev_jmp;
+-          return recv;
+-        }
+-        else {
+-          mrb_assert(!MRB_PROC_CFUNC_P(ci[-1].proc));
+-          irep = ci[-1].proc->body.irep;
+-        }
+-      }
+-      mrb_assert(ci > mrb->c->cibase);
+-      ci->stack[0] = recv;
+-      /* pop stackpos */
+-      ci = cipop(mrb);
+-      JUMP;
+-    }
+-
+     CASE(OP_CALL, Z) {
+       mrb_value recv = ci->stack[0];
+       const struct RProc *p = mrb_proc_ptr(recv);
