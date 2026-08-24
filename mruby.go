@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -151,6 +152,9 @@ func (vm *VM) call(recv *Value, name string, args []any) (*Value, error) {
 }
 
 func (vm *VM) callBlock(recv *Value, name string, block *Value, args []any) (*Value, error) {
+	defer runtime.KeepAlive(recv)
+	defer runtime.KeepAlive(block)
+	defer runtime.KeepAlive(args)
 	b := builder{vm: vm}
 	defer b.done()
 

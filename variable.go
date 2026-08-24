@@ -3,6 +3,7 @@ package mruby
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -144,6 +145,7 @@ func (v *Value) InstanceVar(name string) (*Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer runtime.KeepAlive(v)
 	raw, err := v.vm.in.IVGet(ref, name, false)
 	if err != nil {
 		return nil, v.vm.wrap(err)
@@ -171,6 +173,7 @@ func (v *Value) SetInstanceVar(name string, value any) error {
 	if err := b.flush(); err != nil {
 		return err
 	}
+	defer runtime.KeepAlive(v)
 	if err := v.vm.in.IVSet(ref, name); err != nil {
 		return v.vm.wrap(err)
 	}
@@ -179,6 +182,7 @@ func (v *Value) SetInstanceVar(name string, value any) error {
 
 // store leaves value alone in the argument scratch, which is where the interpreter's setters take theirs, and runs the setter on it.
 func (vm *VM) store(value any, set func() error) error {
+	defer runtime.KeepAlive(value)
 	b := builder{vm: vm}
 	defer b.done()
 
