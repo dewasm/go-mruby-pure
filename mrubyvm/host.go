@@ -141,7 +141,7 @@ func NewInstance(stdout, stderr io.Writer, hostCall func(*Instance) int32) (_ *I
 
 	imports := Imports{
 		"host":                   map[string]any{"call": in.hostEntry, "hook": in.hookEntry},
-		"wasi_snapshot_preview1": map[string]any{"fd_write": in.fdWrite},
+		"wasi_snapshot_preview1": map[string]any{"fd_write": in.fdWrite, "fd_fdstat_get": in.fdFdstatGet},
 	}
 	in.mod = NewMrubyvm(imports, nil, nil, nil)
 	if in.fn, err = bindFuncs(in.mod); err != nil {
@@ -1133,5 +1133,32 @@ func (in *Instance) fdWrite(fd, iovsPtr, iovsLen, nwrittenPtr uint32) uint32 {
 		}
 	}
 	mem.i32_store(uint64(nwrittenPtr), written)
+	return wasiOk
+}
+
+// fdFdstatGet answers for the two descriptors this instance owns and leaves every other one to the bundled WASI.
+//
+// The bundled implementation reports tty-ness by fstat'ing the *os.File behind the fd, one real syscall per call, and mruby's Kernel#print asks isatty on every call (mruby src/print.c), so a print-heavy script paid an fstat per print: a 300k-iteration print loop spent 230ms of its 670ms there.
+// fds 1 and 2 are not the host process's streams here but this instance's io.Writers, so their filetype is a property of the VM model rather than of the host: report a regular file unconditionally.
+// The value is unobservable either way. wasi-libc's isatty additionally requires the fd to lack FD_SEEK and FD_TELL, which stdioRights always grants, so isatty already answered false for these fds whatever the host's stdout was; and wasm/src/shim.c puts stdio in _IONBF, which fixes the write chunking the writers see independently of any buffering-mode heuristic.
+func (in *Instance) fdFdstatGet(fd, outPtr uint32) uint32 {
+	switch fd {
+	case 1, 2:
+	default:
+		return in.mod.wasiInstance().wasi_fd_fdstat_get(fd, outPtr)
+	}
+
+	// fdstat: fs_filetype (u8) + pad + fs_flags (u16) + pad + fs_rights_base (u64) + fs_rights_inheriting (u64) = 24 bytes.
+	base, inheriting := ^uint64(0), ^uint64(0)
+	var fdflags uint16
+	if m, ok := in.mod.wasiInstance().meta[fd]; ok {
+		base, inheriting, fdflags = m.base, m.inheriting, m.fdflags
+	}
+	mem := in.mod.memory
+	mem.fill(uint64(outPtr), 0, 24)
+	mem.i32_store8(uint64(outPtr), 4) // regular file
+	mem.i32_store16(uint64(outPtr)+2, uint32(fdflags))
+	mem.i64_store(uint64(outPtr)+8, base)
+	mem.i64_store(uint64(outPtr)+16, inheriting)
 	return wasiOk
 }
