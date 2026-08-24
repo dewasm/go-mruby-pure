@@ -82,6 +82,7 @@ type held struct {
 	ref int32
 }
 
+// Anything that reads v.ref and then enters the interpreter must keep v reachable past the entry (runtime.KeepAlive): once v is unreachable this cleanup queues the reference, and the next entry point, on any goroutine, frees it.
 func addCleanup(v *Value, h held) runtime.Cleanup {
 	return runtime.AddCleanup(v, func(h held) { h.in.ReleaseRef(h.ref) }, h)
 }
@@ -197,6 +198,7 @@ func (v *Value) String() string {
 	}
 	// Nothing inside this package formats a Value: this takes the interpreter's lock, which the caller may already hold.
 	defer v.vm.enter()()
+	defer runtime.KeepAlive(v)
 	if v.released.Load() {
 		return errReleased.Error()
 	}
@@ -225,6 +227,7 @@ func (v *Value) Inspect() string {
 		return formatFloat(v.f)
 	}
 	defer v.vm.enter()()
+	defer runtime.KeepAlive(v)
 	if v.released.Load() {
 		return errReleased.Error()
 	}
@@ -269,6 +272,7 @@ func (v *Value) Release() {
 	if v == nil || v.ref == 0 {
 		return
 	}
+	defer runtime.KeepAlive(v)
 	if !v.released.CompareAndSwap(false, true) {
 		return
 	}
@@ -284,6 +288,7 @@ func (v *Value) GoValue() (any, error) {
 		return nil, nil
 	}
 	defer v.vm.enter()()
+	defer runtime.KeepAlive(v)
 	return v.vm.goValue(v, nil)
 }
 
@@ -334,6 +339,7 @@ func (vm *VM) descend(v *Value, path []int64) ([]int64, error) {
 }
 
 func (vm *VM) goSlice(v *Value, path []int64) (any, error) {
+	defer runtime.KeepAlive(v)
 	path, err := vm.descend(v, path)
 	if err != nil {
 		return nil, err
@@ -363,6 +369,7 @@ func (vm *VM) goSlice(v *Value, path []int64) (any, error) {
 }
 
 func (vm *VM) goMap(v *Value, path []int64) (any, error) {
+	defer runtime.KeepAlive(v)
 	path, err := vm.descend(v, path)
 	if err != nil {
 		return nil, err
@@ -392,8 +399,10 @@ func (vm *VM) goMap(v *Value, path []int64) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		key := vm.handle(kraw.Kind, kraw.Ref)
-		if !referenced(kraw.Kind) {
+		var key *Value
+		if referenced(kraw.Kind) {
+			key = vm.handle(kraw.Kind, kraw.Ref)
+		} else {
 			key = &Value{vm: vm, kind: kraw.Kind, i: kraw.Int, f: kraw.Float, s: kraw.Str}
 			vm.in.ReleaseRef(kraw.Ref)
 		}

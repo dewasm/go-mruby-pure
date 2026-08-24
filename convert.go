@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 
 	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
@@ -29,6 +30,7 @@ func (vm *VM) ToValue(x any) (*Value, error) {
 		return v, nil
 	}
 	defer vm.enter()()
+	defer runtime.KeepAlive(x)
 
 	b := builder{vm: vm}
 	defer b.done()

@@ -3,6 +3,7 @@ package mruby
 import (
 	"errors"
 	"fmt"
+	"runtime"
 
 	"github.com/dewasm/go-mruby-pure/mrubyvm"
 )
@@ -15,6 +16,7 @@ func (vm *VM) DefineClass(name string, super *Class) (*Class, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer runtime.KeepAlive(super)
 	ref, err := vm.in.DefineClass(name, superRef)
 	if err != nil {
 		return nil, vm.wrap(err)
@@ -52,6 +54,7 @@ func (c *Class) DefineClassMethod(name string, fn any) error {
 	if err != nil {
 		return err
 	}
+	defer runtime.KeepAlive(c.value)
 	if err := c.vm.in.DefineSingletonMethod(c.value.ref, name, id); err != nil {
 		return c.vm.wrap(err)
 	}
@@ -72,6 +75,7 @@ func (m *Module) DefineModuleFunction(name string, fn any) error {
 	if err != nil {
 		return err
 	}
+	defer runtime.KeepAlive(m.value)
 	if err := m.vm.in.DefineModuleFunction(m.value.ref, name, id); err != nil {
 		return m.vm.wrap(err)
 	}
@@ -98,6 +102,7 @@ func (n *namespace) DefineMethod(name string, fn any) error {
 	if err != nil {
 		return err
 	}
+	defer runtime.KeepAlive(n.value)
 	if err := n.vm.in.DefineMethod(n.value.ref, name, id); err != nil {
 		return n.vm.wrap(err)
 	}
@@ -118,6 +123,8 @@ func (n *namespace) DefineClass(name string, super *Class) (*Class, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer runtime.KeepAlive(n.value)
+	defer runtime.KeepAlive(super)
 	ref, err := n.vm.in.DefineClassUnder(n.value.ref, name, superRef)
 	if err != nil {
 		return nil, n.vm.wrap(err)
@@ -129,6 +136,7 @@ func (n *namespace) DefineClass(name string, super *Class) (*Class, error) {
 func (n *namespace) DefineModule(name string) (*Module, error) {
 	defer n.vm.enter()()
 
+	defer runtime.KeepAlive(n.value)
 	ref, err := n.vm.in.DefineModuleUnder(n.value.ref, name)
 	if err != nil {
 		return nil, n.vm.wrap(err)
