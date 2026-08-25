@@ -1,0 +1,425 @@
+The program counter of mrb_vm_exec() cached in a local, applied after wasm/vm-split.patch to the pinned mruby 4.0.0 source and only to the wasm build this repository converts to Go.
+mruby 4.0 keeps the program counter of the running frame in ci->pc, so the dispatch loop reads it from memory to fetch the opcode, reads it again to decode the operands and writes it back advanced, once per instruction.
+A native build holds that in a register; the converted Go build cannot, and a symbolized profile of this build attributes 58.5% of fib's samples to the linear-memory helpers (bounds check 22%, i32_store 21%, i32_load 11%, i32_load8_u 4%), with the ci->pc round-trip as the pattern that recurs at every opcode.
+mruby before 3.x kept the program counter in a local with explicit sync points, so the shape is known-viable; this patch reintroduces it for this build only.
+
+mrb_vm_exec() gains a local `vmpc` that holds the program counter of the running frame, and three macros: PC_SYNC() writes it to ci->pc, PC_RELOAD() adopts a ci->pc set elsewhere, PC_SET() stores a new value in both.
+DECODE_OPERANDS() and CALL_CODE_HOOKS() work on `vmpc` instead of ci->pc, so the fetch-decode step of every instruction is register traffic.
+
+Where ci->pc is made current is decided per dispatch macro rather than per opcode body:
+
+- CASE() ends with PC_SYNC(), so every opcode body it labels sees exactly the ci->pc it saw before this patch. That is the default, and it leaves the opcode bodies unread and unedited: what the patch removes for them is the per-instruction load, not the store.
+- CASE_F() omits the sync. The opcode bodies it labels are the ones audited to make no call that can raise, allocate, transfer control between callinfo frames or read ci->pc, so nothing between the operand decode and the next instruction can observe the stale value. They are OP_NOP, OP_MOVE, the OP_LOADI family, OP_LOADI16, OP_LOADSYM, OP_LOADNIL, OP_LOADSELF, OP_LOADTRUE, OP_LOADFALSE, the four jumps, OP_ADD/OP_SUB/OP_MUL, OP_ADDI/OP_SUBI and the five comparisons.
+- JUMP is no longer a synonym for NEXT: it reloads `vmpc` from ci->pc first, and it is what every exit that changed ci->pc or switched callinfo frames uses (the send tail through VS_DISPATCH(), OP_CALL, OP_BLKCALL, OP_ENTER, OP_EXEC, the OP_RETURN family, OP_JMPUW, and the L_RAISE landing that OP_RAISEIF ends with, whose NEXT this patch turns into a JUMP).
+
+The three windows where a CASE_F() body can still be observed are closed explicitly.
+The code fetch hook fires with the same pc argument at the same points, and PC_SYNC() moved inside the `if ((mrb)->code_fetch_hook)` it already guards: the hook can raise, the raise path reads ci->pc of the interrupted frame, and a build with no hook armed pays nothing.
+The arithmetic and comparison macros PC_SYNC() before every exit that leaves the integer or float fast path: the overflow branch, the boxed-float branch, the string branch and the operator-send fallback.
+SET_INT_VALUE() heap-allocates outside the fixnum range under word boxing, which is the profile this build ships, so the integer result of OP_MATH/OP_MATHI goes through PC_SET_INT_VALUE(), which takes the immediate path when FIXABLE() holds and syncs before the allocating one. Under MRB_NO_BOXING the condition folds away.
+
+OP_JMP, OP_JMPIF, OP_JMPNOT and OP_JMPNIL move the program counter in `vmpc` and fall through to NEXT, which is why they can be CASE_F(); OP_JMPUW keeps ci->pc because it reads it back for catch_handler_find() and can throw a tagged break.
+OP_EXT1/OP_EXT2/OP_EXT3 decode into another opcode's body label, which skips that body's CASE() sync, so they use PC_SET().
+`vmpc` needs no volatile: every path that re-enters the dispatch loop after a longjmp (L_RAISE, the RBREAK checkpoints) reaches it through JUMP.
+
+--- a/src/vm.c
++++ b/src/vm.c
+@@ -1515,9 +1515,35 @@
+ #define CHECKPOINT_END(tag) \
+     } while (0); \
+   } while (0)
++
++/**** dewasm experiment: the program counter cached in a local ****/
++/* mrb_vm_exec() keeps the program counter of the running frame in `vmpc` and
++ * writes it back to ci->pc at every point where other code can observe it.
++ * PC_SYNC() makes ci->pc current, PC_RELOAD() adopts a ci->pc set elsewhere,
++ * PC_SET() stores a new value in both. All three are only usable inside
++ * mrb_vm_exec(), where `ci` and `vmpc` are in scope. */
++#define PC_SYNC()   (ci->pc = vmpc)
++#define PC_RELOAD() (vmpc = ci->pc)
++#define PC_SET(p)   (ci->pc = vmpc = (p))
++
++/* SET_INT_VALUE() heap-allocates outside the fixnum range under word and NaN
++ * boxing, so the allocating half needs a synced ci->pc; the fixnum half is the
++ * one the CASE_F() opcodes are kept call-free for. */
++#define PC_SET_INT_VALUE(mrb, r, n) do {                                    \
++  mrb_int pc_int_value_ = (n);                                              \
++  if (mrb_likely(FIXABLE(pc_int_value_))) {                                 \
++    SET_FIXNUM_VALUE(r, pc_int_value_);                                     \
++  }                                                                         \
++  else {                                                                    \
++    PC_SYNC();                                                              \
++    SET_INT_VALUE(mrb, r, pc_int_value_);                                   \
++  }                                                                         \
++} while (0)
++/**** end of the program counter cache declarations ****/
+ 
+ #ifdef MRB_USE_DEBUG_HOOK
+-#define CODE_FETCH_HOOK(mrb, irep, pc, regs) if ((mrb)->code_fetch_hook) (mrb)->code_fetch_hook((mrb), (irep), (pc), (regs));
++/* The hook can raise, and the raise path reads ci->pc of the interrupted frame. */
++#define CODE_FETCH_HOOK(mrb, irep, pc, regs) if ((mrb)->code_fetch_hook) { PC_SYNC(); (mrb)->code_fetch_hook((mrb), (irep), (pc), (regs)); }
+ #else
+ #define CODE_FETCH_HOOK(mrb, irep, pc, regs)
+ #endif
+@@ -1537,23 +1563,25 @@
+ #ifdef MRB_USE_VM_SWITCH_DISPATCH
+ 
+ #define INIT_DISPATCH for (;;) { CALL_CODE_HOOKS(); switch (insn) {
+-#define CASE(insn,ops) case insn: DECODE_OPERANDS(ops); L_ ## insn ## _BODY:
++#define CASE(insn,ops) case insn: DECODE_OPERANDS(ops); PC_SYNC(); L_ ## insn ## _BODY:
++#define CASE_F(insn,ops) case insn: DECODE_OPERANDS(ops); L_ ## insn ## _BODY:
+ #define NEXT goto L_END_DISPATCH
+-#define JUMP NEXT
++#define JUMP PC_RELOAD(); NEXT
+ #define END_DISPATCH L_END_DISPATCH: RETURN_IF_TASK_STOPPED(mrb);}}
+ 
+ #else
+ 
+ #define INIT_DISPATCH JUMP; return mrb_nil_value();
+-#define CASE(insn,ops) L_ ## insn: DECODE_OPERANDS(ops); L_ ## insn ## _BODY:
++#define CASE(insn,ops) L_ ## insn: DECODE_OPERANDS(ops); PC_SYNC(); L_ ## insn ## _BODY:
++#define CASE_F(insn,ops) L_ ## insn: DECODE_OPERANDS(ops); L_ ## insn ## _BODY:
+ #define NEXT RETURN_IF_TASK_STOPPED(mrb); CALL_CODE_HOOKS(); goto *optable[insn]
+-#define JUMP NEXT
++#define JUMP PC_RELOAD(); NEXT
+ #define END_DISPATCH RETURN_IF_TASK_STOPPED(mrb)
+ 
+ #endif
+ 
+-#define DECODE_OPERANDS(ops) do { const mrb_code *pc = ci->pc+1; FETCH_ ## ops (); ci->pc = pc; } while (0)
+-#define CALL_CODE_HOOKS() do { insn = BYTECODE_DECODER(*ci->pc); CODE_FETCH_HOOK(mrb, irep, ci->pc, regs); } while (0)
++#define DECODE_OPERANDS(ops) do { const mrb_code *pc = vmpc+1; FETCH_ ## ops (); vmpc = pc; } while (0)
++#define CALL_CODE_HOOKS() do { insn = BYTECODE_DECODER(*vmpc); CODE_FETCH_HOOK(mrb, irep, vmpc, regs); } while (0)
+ 
+ #ifdef MRB_USE_TASK_SCHEDULER
+ #define RETURN_IF_TASK_STOPPED(mrb) do { \
+@@ -1789,11 +1817,11 @@
+  * for; only usable inside mrb_vm_exec(). */
+ #define VS_DISPATCH(call) do { \
+   switch (call) { \
+-  case VS_NEXT:         NEXT; \
++  case VS_NEXT:         JUMP; \
+   case VS_RAISE:        goto L_RAISE; \
+   case VS_RETURN:       return vs_ret; \
+   } \
+-  NEXT; \
++  JUMP; \
+ } while (0)
+ 
+ /**** end of the split-out send tail ****/
+@@ -1840,6 +1868,7 @@
+   mrb_sym mid;
+   const struct mrb_irep_catch_handler *ch;
+   mrb_value vs_ret;             /* return value handed back by vmop_send() */
++  const mrb_code *vmpc = iseq;  /* the cached copy of ci->pc; see PC_SYNC() */
+ 
+ #ifndef MRB_USE_VM_SWITCH_DISPATCH
+   static const void * const optable[] = {
+@@ -1882,12 +1911,12 @@
+ #endif
+ 
+   INIT_DISPATCH {
+-    CASE(OP_NOP, Z) {
++    CASE_F(OP_NOP, Z) {
+       /* do nothing */
+       NEXT;
+     }
+ 
+-    CASE(OP_MOVE, BB) {
++    CASE_F(OP_MOVE, BB) {
+       regs[a] = regs[b];
+       NEXT;
+     }
+@@ -1933,31 +1962,31 @@
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADI8, BB) {
++    CASE_F(OP_LOADI8, BB) {
+       SET_FIXNUM_VALUE(regs[a], b);
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADINEG, BB) {
++    CASE_F(OP_LOADINEG, BB) {
+       SET_FIXNUM_VALUE(regs[a], -b);
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADI__1,B) goto L_LOADI;
+-    CASE(OP_LOADI_0,B) goto L_LOADI;
+-    CASE(OP_LOADI_1,B) goto L_LOADI;
+-    CASE(OP_LOADI_2,B) goto L_LOADI;
+-    CASE(OP_LOADI_3,B) goto L_LOADI;
+-    CASE(OP_LOADI_4,B) goto L_LOADI;
+-    CASE(OP_LOADI_5,B) goto L_LOADI;
+-    CASE(OP_LOADI_6,B) goto L_LOADI;
+-    CASE(OP_LOADI_7, B) {
++    CASE_F(OP_LOADI__1,B) goto L_LOADI;
++    CASE_F(OP_LOADI_0,B) goto L_LOADI;
++    CASE_F(OP_LOADI_1,B) goto L_LOADI;
++    CASE_F(OP_LOADI_2,B) goto L_LOADI;
++    CASE_F(OP_LOADI_3,B) goto L_LOADI;
++    CASE_F(OP_LOADI_4,B) goto L_LOADI;
++    CASE_F(OP_LOADI_5,B) goto L_LOADI;
++    CASE_F(OP_LOADI_6,B) goto L_LOADI;
++    CASE_F(OP_LOADI_7, B) {
+     L_LOADI:
+       SET_FIXNUM_VALUE(regs[a], (mrb_int)insn - (mrb_int)OP_LOADI_0);
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADI16, BS) {
++    CASE_F(OP_LOADI16, BS) {
+       SET_FIXNUM_VALUE(regs[a], (mrb_int)(int16_t)b);
+       NEXT;
+     }
+@@ -1967,27 +1996,27 @@
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADSYM, BB) {
++    CASE_F(OP_LOADSYM, BB) {
+       SET_SYM_VALUE(regs[a], irep->syms[b]);
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADNIL, B) {
++    CASE_F(OP_LOADNIL, B) {
+       SET_NIL_VALUE(regs[a]);
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADSELF, B) {
++    CASE_F(OP_LOADSELF, B) {
+       regs[a] = regs[0];
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADTRUE, B) {
++    CASE_F(OP_LOADTRUE, B) {
+       SET_TRUE_VALUE(regs[a]);
+       NEXT;
+     }
+ 
+-    CASE(OP_LOADFALSE, B) {
++    CASE_F(OP_LOADFALSE, B) {
+       SET_FALSE_VALUE(regs[a]);
+       NEXT;
+     }
+@@ -2218,28 +2247,25 @@
+       NEXT;
+     }
+ 
+-    CASE(OP_JMP, S) {
+-      ci->pc += (int16_t)a;
+-      JUMP;
++    CASE_F(OP_JMP, S) {
++      vmpc += (int16_t)a;
++      NEXT;
+     }
+-    CASE(OP_JMPIF, BS) {
++    CASE_F(OP_JMPIF, BS) {
+       if (mrb_test(regs[a])) {
+-        ci->pc += (int16_t)b;
+-        JUMP;
++        vmpc += (int16_t)b;
+       }
+       NEXT;
+     }
+-    CASE(OP_JMPNOT, BS) {
++    CASE_F(OP_JMPNOT, BS) {
+       if (!mrb_test(regs[a])) {
+-        ci->pc += (int16_t)b;
+-        JUMP;
++        vmpc += (int16_t)b;
+       }
+       NEXT;
+     }
+-    CASE(OP_JMPNIL, BS) {
++    CASE_F(OP_JMPNIL, BS) {
+       if (mrb_nil_p(regs[a])) {
+-        ci->pc += (int16_t)b;
+-        JUMP;
++        vmpc += (int16_t)b;
+       }
+       NEXT;
+     }
+@@ -2365,7 +2391,7 @@
+         stack_extend(mrb, irep->nregs);
+         ci->pc = irep->iseq + mrb_irep_catch_handler_unpack(ch->target);
+       }
+-      NEXT;
++      JUMP;
+     }
+ 
+     CASE(OP_MATCHERR, B) {
+@@ -2973,12 +2999,13 @@
+   if (mrb_likely(tt == TYPES2(MRB_TT_INTEGER, MRB_TT_INTEGER))) {           \
+     mrb_int x = mrb_integer(regs[a]), y = mrb_integer(regs[a+1]), z;        \
+     if (mrb_int_##op_name##_overflow(x, y, &z)) {                           \
++      PC_SYNC();                                                            \
+       OP_MATH_OVERFLOW_INT(op_name,x,y);                                    \
+     }                                                                       \
+     else                                                                    \
+-      SET_INT_VALUE(mrb,regs[a], z);                                        \
++      PC_SET_INT_VALUE(mrb,regs[a], z);                                     \
+   }                                                                         \
+-  else switch (tt) {                                                        \
++  else { PC_SYNC(); switch (tt) {                                           \
+     OP_MATH_CASE_FLOAT(op_name, integer, float);                            \
+     OP_MATH_CASE_FLOAT(op_name, float,  integer);                           \
+     OP_MATH_CASE_FLOAT(op_name, float,  float);                             \
+@@ -2986,7 +3013,7 @@
+     default:                                                                \
+       mid = MRB_OPSYM(op_name);                                             \
+       goto L_SEND_SYM;                                                      \
+-  }                                                                         \
++  } }                                                                       \
+ } while(0);                                                                 \
+   NEXT;
+ #define OP_MATH_CASE_INTEGER(op_name)                                       \
+@@ -3029,15 +3056,15 @@
+ #define OP_MATH_TT_integer MRB_TT_INTEGER
+ #define OP_MATH_TT_float   MRB_TT_FLOAT
+ 
+-    CASE(OP_ADD, B) {
++    CASE_F(OP_ADD, B) {
+       OP_MATH(add);
+     }
+ 
+-    CASE(OP_SUB, B) {
++    CASE_F(OP_SUB, B) {
+       OP_MATH(sub);
+     }
+ 
+-    CASE(OP_MUL, B) {
++    CASE_F(OP_MUL, B) {
+       OP_MATH(mul);
+     }
+ 
+@@ -3086,18 +3113,19 @@
+   if (mrb_likely(mrb_integer_p(regs[a]))) {                                 \
+     mrb_int x = mrb_integer(regs[a]), y = (mrb_int)b, z;                    \
+     if (mrb_int_##op_name##_overflow(x, y, &z)) {                           \
++      PC_SYNC();                                                            \
+       OP_MATH_OVERFLOW_INT(op_name,x,y);                                    \
+     }                                                                       \
+     else                                                                    \
+-      SET_INT_VALUE(mrb,regs[a], z);                                        \
++      PC_SET_INT_VALUE(mrb,regs[a], z);                                     \
+   }                                                                         \
+-  else switch (mrb_type(regs[a])) {                                         \
++  else { PC_SYNC(); switch (mrb_type(regs[a])) {                            \
+     OP_MATHI_CASE_FLOAT(op_name);                                           \
+     default:                                                                \
+       SET_INT_VALUE(mrb,regs[a+1], b);                                      \
+       mid = MRB_OPSYM(op_name);                                             \
+       goto L_SEND_SYM;                                                      \
+-  }                                                                         \
++  } }                                                                       \
+ } while(0);                                                                 \
+   NEXT;
+ #define OP_MATHI_CASE_INTEGER(op_name)                                      \
+@@ -3123,11 +3151,11 @@
+     break
+ #endif
+ 
+-    CASE(OP_ADDI, BB) {
++    CASE_F(OP_ADDI, BB) {
+       OP_MATHI(add);
+     }
+ 
+-    CASE(OP_SUBI, BB) {
++    CASE_F(OP_SUBI, BB) {
+       OP_MATHI(sub);
+     }
+ 
+@@ -3189,6 +3217,7 @@
+     result = OP_CMP_BODY(op,mrb_fixnum,mrb_fixnum);\
+   }\
+   else {\
++    PC_SYNC();\
+     mid = MRB_OPSYM(sym);\
+     goto L_SEND_SYM;\
+   }\
+@@ -3218,6 +3247,7 @@
+     result = OP_CMP_BODY(op,mrb_float,mrb_float);\
+     break;\
+   default:\
++    PC_SYNC();\
+     mid = MRB_OPSYM(sym);\
+     goto L_SEND_SYM;\
+   }\
+@@ -3230,7 +3260,7 @@
+ } while(0)
+ #endif
+ 
+-    CASE(OP_EQ, B) {
++    CASE_F(OP_EQ, B) {
+       if (mrb_obj_eq(mrb, regs[a], regs[a+1])) {
+         SET_TRUE_VALUE(regs[a]);
+       }
+@@ -3243,22 +3273,22 @@
+       NEXT;
+     }
+ 
+-    CASE(OP_LT, B) {
++    CASE_F(OP_LT, B) {
+       OP_CMP(<,lt);
+       NEXT;
+     }
+ 
+-    CASE(OP_LE, B) {
++    CASE_F(OP_LE, B) {
+       OP_CMP(<=,le);
+       NEXT;
+     }
+ 
+-    CASE(OP_GT, B) {
++    CASE_F(OP_GT, B) {
+       OP_CMP(>,gt);
+       NEXT;
+     }
+ 
+-    CASE(OP_GE, B) {
++    CASE_F(OP_GE, B) {
+       OP_CMP(>=,ge);
+       NEXT;
+     }
+@@ -3656,30 +3686,30 @@
+     }
+ 
+     CASE(OP_EXT1, Z) {
+-      const mrb_code *pc = ci->pc;
++      const mrb_code *pc = vmpc;
+       insn = READ_B();
+       switch (insn) {
+-#define OPCODE(insn,ops) case OP_ ## insn: FETCH_ ## ops ## _1(); ci->pc = pc; goto L_OP_ ## insn ## _BODY;
++#define OPCODE(insn,ops) case OP_ ## insn: FETCH_ ## ops ## _1(); PC_SET(pc); goto L_OP_ ## insn ## _BODY;
+ #include <mruby/ops.h>
+ #undef OPCODE
+       }
+       NEXT;
+     }
+     CASE(OP_EXT2, Z) {
+-      const mrb_code *pc = ci->pc;
++      const mrb_code *pc = vmpc;
+       insn = READ_B();
+       switch (insn) {
+-#define OPCODE(insn,ops) case OP_ ## insn: FETCH_ ## ops ## _2(); ci->pc = pc; goto L_OP_ ## insn ## _BODY;
++#define OPCODE(insn,ops) case OP_ ## insn: FETCH_ ## ops ## _2(); PC_SET(pc); goto L_OP_ ## insn ## _BODY;
+ #include <mruby/ops.h>
+ #undef OPCODE
+       }
+       NEXT;
+     }
+     CASE(OP_EXT3, Z) {
+-      const mrb_code *pc = ci->pc;
++      const mrb_code *pc = vmpc;
+       insn = READ_B();
+       switch (insn) {
+-#define OPCODE(insn,ops) case OP_ ## insn: FETCH_ ## ops ## _3(); ci->pc = pc; goto L_OP_ ## insn ## _BODY;
++#define OPCODE(insn,ops) case OP_ ## insn: FETCH_ ## ops ## _3(); PC_SET(pc); goto L_OP_ ## insn ## _BODY;
+ #include <mruby/ops.h>
+ #undef OPCODE
+       }

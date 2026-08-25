@@ -16,6 +16,8 @@ WASM_OPT_FLAGS := \
 CACHE := wasm/cache
 TARBALL := $(CACHE)/mruby-$(MRUBY_VERSION).tar.gz
 SRC := $(CACHE)/mruby-$(MRUBY_VERSION)
+VM_PATCH := wasm/vm-split.patch
+PC_PATCH := wasm/vm-pc-local.patch
 BUILD := $(CACHE)/build-$(PROFILE)/wasm32-wasi
 LIB := $(BUILD)/lib/libmruby.a
 SHIM := $(BUILD)/shim.o
@@ -30,8 +32,10 @@ $(TARBALL):
 	curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused -o $@ $(MRUBY_URL)
 	echo "$(MRUBY_SHA256)  $@" | shasum -a 256 -c - >/dev/null
 
-$(SRC)/Rakefile: $(TARBALL)
+$(SRC)/Rakefile: $(TARBALL) $(VM_PATCH) $(PC_PATCH)
 	tar xzf $(TARBALL) -C $(CACHE)
+	patch -p1 -d $(SRC) < $(VM_PATCH)
+	patch -p1 -d $(SRC) < $(PC_PATCH)
 	touch $@
 
 $(RT): tools/mruby-cc.sh
